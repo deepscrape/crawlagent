@@ -1,28 +1,43 @@
 # ------------- dependency placeholders -------------
 import asyncio
-from asyncio.log import logger
 import json
 import logging
+from asyncio.log import logger
 from typing import Any, Callable, Dict, Optional, Union
 
 from celery import uuid
+from celery.result import AsyncResult  # Import AsyncResult here
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, HttpUrl
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 
-from redisCache import REDIS_CHANNEL, redis, pure_redis, redis_xread
-from api import cancel_a_job, handle_crawl_job, handle_crawl_stream_job, handle_llm_request, handle_markdown_request, handle_stream_task_status, handle_task_status
+from api import (
+    cancel_a_job,
+    handle_crawl_job,
+    handle_crawl_stream_job,
+    handle_llm_request,
+    handle_markdown_request,
+    handle_stream_task_status,
+    handle_task_status,
+)
 from auth import get_token_dependency
+from celery_app import celery_app  # Import celery_app here
 from crawl import reader
 from firestore import FirebaseClient
+from redisCache import REDIS_CHANNEL, pure_redis, redis, redis_xread
 from schemas import CrawlOperation, CrawlRequest, MarkdownRequest, RawCode
-
 from triggers import event_stream
 from utils import load_config, safe_eval_config, setup_logging, stream_results
-
-from celery.result import AsyncResult # Import AsyncResult here
-from celery_app import celery_app # Import celery_app here
 
 config = load_config()
 setup_logging(config)

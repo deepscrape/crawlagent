@@ -1,32 +1,60 @@
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import os
-from functools import partial # Import partial
 import platform
 import sys
 import time
+from datetime import datetime, timezone
+from functools import partial  # Import partial
 from typing import AsyncGenerator, Dict, List, Optional, cast
 from urllib.parse import unquote
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlResult, CrawlerRunConfig, DefaultMarkdownGenerator, LLMConfig, LLMContentFilter, LLMExtractionStrategy, LXMLWebScrapingStrategy, MemoryAdaptiveDispatcher, PruningContentFilter, RateLimiter
+from celery.exceptions import SoftTimeLimitExceeded
+from crawl4ai import (
+    AsyncWebCrawler,
+    BrowserConfig,
+    CacheMode,
+    CrawlerRunConfig,
+    CrawlResult,
+    DefaultMarkdownGenerator,
+    LLMConfig,
+    LLMContentFilter,
+    LLMExtractionStrategy,
+    LXMLWebScrapingStrategy,
+    MemoryAdaptiveDispatcher,
+    PruningContentFilter,
+    RateLimiter,
+)
+
 # from crawl4ai.utils import perform_completion_with_backoff
 from fastapi import HTTPException, status
 from redis import RedisError
+
+from celery_app import celery_app
+from crawler_pool import cancel_crawler, get_crawler
+
 # import psutil
-
-
 from crawlstore import updateCrawlOperation
 from firestore import FirebaseClient
 from monitor import WorkerMonitor
-from redisCache import REDIS_CHANNEL, redis as redis_cache, pure_redis as pure_redis_cache
-
-from celery_app import celery_app
-from celery.exceptions import SoftTimeLimitExceeded
+from redisCache import REDIS_CHANNEL
+from redisCache import pure_redis as pure_redis_cache
+from redisCache import redis as redis_cache
 from schemas import OperationResult
-from utils import FilterType, TaskStatus, _get_memory_mb, datetime_handler, decode_redis_hash, is_task_id, setup_logging, should_cleanup_task, load_config, stream_pubsub_results, task_status_color
-from crawler_pool import get_crawler, cancel_crawler
+from utils import (
+    FilterType,
+    TaskStatus,
+    _get_memory_mb,
+    datetime_handler,
+    decode_redis_hash,
+    is_task_id,
+    load_config,
+    setup_logging,
+    should_cleanup_task,
+    stream_pubsub_results,
+    task_status_color,
+)
 
 if sys.platform != "win32":
     import uvloop  # type: ignore

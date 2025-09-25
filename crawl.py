@@ -1,9 +1,12 @@
 import asyncio
-from datetime import datetime
 import json
 import os
 import time
+from datetime import datetime
+from functools import partial
 
+import psutil
+from aiomultiprocess import Pool
 from crawl4ai import (
     AsyncWebCrawler,
     BrowserConfig,
@@ -14,29 +17,24 @@ from crawl4ai import (
 )
 from fastapi import Request, Response, status
 from fastapi.responses import StreamingResponse
-import psutil
-from functools import partial
-from aiomultiprocess import Pool
-
 
 # from crawlstore import getCrawlMetadata, updateCrawlOperation
-
 # from firestore import FirebaseClient
 from crawlstore import getCrawlMetadata, updateCrawlOperation
 from firestore import FirebaseClient
 from grafana import ERROR_COUNTER, MEMORY_USAGE, OPERATION_DURATION, QUEUE_SIZE
-from monitor import (
-    WAITING_TIME,
-    DynamicRateLimiter,
-    WorkerMonitor,
-)
+from redisCache import redis
 from triggers import (
     arrayBuffer_basic_crawl,
     basic_crawl_operation,
     event_stream,
     json_basic_crawl,
 )
-from redisCache import redis
+from worker_monitor import (
+    WAITING_TIME,
+    DynamicRateLimiter,
+    WorkerMonitor,
+)
 
 """ 
 To determine how many operations you can run, let's calculate the memory usage per operation and then divide the total available memory by the memory usage per operation.

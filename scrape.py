@@ -1,7 +1,7 @@
-from crawl import process_scheduled_tasks, worker
-from monitor import DynamicRateLimiter, WorkerMonitor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from crawl import process_scheduled_tasks, worker
+from worker_monitor import DynamicRateLimiter, WorkerMonitor
 
 scheduler = AsyncIOScheduler()
 

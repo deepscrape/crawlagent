@@ -1,32 +1,36 @@
-# fly.toml app configuration file generated for crawlagent on 2025-07-15T20:45:27+03:00
+# fly.toml app configuration file generated for crawlagent on 2025-09-24T17:03:15+03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'crawlagent'
-primary_region = 'fra'
+primary_region = 'ord'
 
 [build]
-  # Add build configuration for better build process
-  dockerfile = "Dockerfile"
-  # build-target = "final"
+  dockerfile = 'Dockerfile'
 
 [env]
+  AWS_ENDPOINT_URL_IAM = 'https://fly.iam.storage.tigris.dev'
+  AWS_ENDPOINT_URL_S3 = 'https://fly.storage.tigris.dev'
+  AWS_REGION = 'auto'
   PYTHON_ENV = 'production'
+  REDIS_MAX_RETRIES = '100'
+  REDIS_RETRY_DELAY_SEC = '3'
   UPSTASH_REDIS_PORT = '30766'
   UPSTASH_REDIS_REST_URL = 'https://gusc1-saved-terrapin-30766.upstash.io'
-  REDIS_MAX_RETRIES = "100"
-  REDIS_RETRY_DELAY_SEC = "3"
-  AWS_ENDPOINT_URL_S3 = 'https://fly.storage.tigris.dev'
-  AWS_ENDPOINT_URL_IAM = 'https://fly.iam.storage.tigris.dev'
-  AWS_REGION = 'auto'
+
+[processes]
+  # Run Uvicorn with proxy header support:
+  app = 'uvicorn server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*" --ws websockets'
+  worker = 'celery -A celery_app.celery_app worker --loglevel=info -E'
+  worker_exporter = './celery-exporter --broker-url=${CELERY_BROKER_URL} --port=9808 --retry-interval=5 --host=0.0.0.0'
 
 [[services]]
   protocol = 'tcp'
   internal_port = 8000
-  auto_stop_machines = 'stop'
+  auto_stop_machines = 'suspend'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
   [[services.ports]]
@@ -40,46 +44,58 @@ primary_region = 'fra'
 
   [services.concurrency]
     type = 'connections'
-    hard_limit = 25
-    soft_limit = 20
+    hard_limit = 50
+    soft_limit = 35
 
 [[services]]
+  protocol = 'tcp'
   internal_port = 9222
-  auto_stop_machines = "stop"
-  auto_start_machines = true
-  min_machines_running = 0
-  protocol = "tcp"
-  processes = ["app", "worker"]
+  processes = ['app'] # Critical: Remove public Chrome DevTools (9222) or enforce auth + restrict binding
 
   [[services.ports]]
     port = 9222
-    handlers = ["http"]
+    handlers = ['http']
 
 [[services]]
+  protocol = 'tcp'
   internal_port = 6080
-  protocol = "tcp"
   processes = ["app"] # , "worker" Critical: Remove public noVNC (6080) or enforce VNC auth + restrict binding
+
   [[services.ports]]
     port = 6080
-    handlers = ["tls", "http"]  # Ensure "tls" is included for HTTPS
+    handlers = ['tls', 'http']
 
-[processes]
-  app = "uvicorn server:app --host 0.0.0.0 --port 8000 --ws websockets"
-  worker = "celery -A celery_app.celery_app worker --loglevel=info"
-  
-  
-  # app = "sh -c 'Xvfb :99 -screen 0 1280x720x24 & export DISPLAY=:99 && uvicorn server:app --host 0.0.0.0 --port 8000 --ws websockets'"
-  # worker = "sh -c 'Xvfb :99 -screen 0 1280x720x24 & export DISPLAY=:99 && celery -A celery_app.celery_app worker --loglevel=info --concurrency=2'"
-  # app = "uvicorn server:app --host 0.0.0.0 --port 8000 --ws websockets"
-  # worker = "celery -A celery_app.celery_app worker --loglevel=info --concurrency=2"
+[[services]]
+  protocol = 'tcp'
+  internal_port = 9808
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['worker_exporter']
+
+  [[services.ports]]
+    port = 9808
+    handlers = ['http']
 
 [[vm]]
   memory = '2gb'
   cpu_kind = 'shared'
   cpus = 4
-  swap_size_mb = 512  # Add swap for compilation
+  processes = ['app', 'worker']
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  count = 1
+  processes = ['worker_exporter']
 
 [[metrics]]
   port = 8000
   path = '/metrics'
-  https = false
+  processes = ['app']
+
+[[metrics]]
+  port = 9808
+  path = '/metrics'
+  processes = ['worker_exporter']

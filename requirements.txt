@@ -17,6 +17,7 @@ psutil>=6.1.1
 aiomultiprocess
 prometheus_client
 prometheus-fastapi-instrumentator
+prometheus-exporter-celery>=0.11.2
 redis[hiredis]
 celery
 courlan

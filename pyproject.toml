@@ -5,6 +5,20 @@ description = "🔥🕷️ Crawl4AI: LLM Web Crawler & scraper"
 authors = [
     { name = "Prokopis Antoniadis", email = "prokopis123@gmail.com" }
 ]
+requires-python = ">=3.12"
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["web-crawler", "scraper", "llm", "ai", "python"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     # Web Framework and Server
     "fastapi>=0.100.0",
@@ -39,6 +53,7 @@ dependencies = [
     "apscheduler>=3.10.0",
     "prometheus_client>=0.17.0",
     "prometheus-fastapi-instrumentator>=6.1.0",
+    "prometheus-exporter-celery>=0.11.2",
 ]
 
 [project.optional-dependencies]
@@ -56,10 +71,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-target-version = ["py312"]
-resolve-log = true
-compile-bytecode = true
-no-installer-metadata = true
+dev-dependencies = [
+  "pytest"
+]
 link-mode = "copy"
 
 [tool.black]
@@ -78,6 +92,6 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [tool.ruff]
-line-length = 88
+line-length = 130
 target-version = "py312"
 select = ["E", "F", "B", "I"]

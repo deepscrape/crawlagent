@@ -10,37 +10,66 @@
 
 
 import asyncio
-from datetime import datetime, timezone
-from functools import partial
 import json
 import logging
 import os
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, cast
-from urllib.parse import unquote
-from celery.result import AsyncResult # Import AsyncResult here
-from celery_app import celery_app # Import celery_app here
-from courlan import get_base_url
-from crawl4ai import AsyncWebCrawler, BM25ContentFilter, BrowserConfig, CacheMode, CrawlResult, CrawlerRunConfig, DefaultMarkdownGenerator, LLMConfig, LLMContentFilter, LLMExtractionStrategy, LXMLWebScrapingStrategy, MemoryAdaptiveDispatcher, PruningContentFilter, RateLimiter
-from crawl4ai.utils import perform_completion_with_backoff
-from schemas import CrawlOperation
-from fastapi import HTTPException, Request,status
-from fastapi.responses import JSONResponse, StreamingResponse
 import signal
 import time
-from datetime import datetime # Import datetime for Celery task ID generation
-from celery.result import AsyncResult # Import AsyncResult
+from datetime import (
+    datetime,  # Import datetime for Celery task ID generation
+    timezone,
+)
+from functools import partial
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, cast
+from urllib.parse import unquote
 
+from celery.result import AsyncResult  # Import AsyncResult here  # Import AsyncResult
+from courlan import get_base_url
+from crawl4ai import (
+    AsyncWebCrawler,
+    BM25ContentFilter,
+    BrowserConfig,
+    CacheMode,
+    CrawlerRunConfig,
+    CrawlResult,
+    DefaultMarkdownGenerator,
+    LLMConfig,
+    LLMContentFilter,
+    LLMExtractionStrategy,
+    LXMLWebScrapingStrategy,
+    MemoryAdaptiveDispatcher,
+    PruningContentFilter,
+    RateLimiter,
+)
+from crawl4ai.utils import perform_completion_with_backoff
+from fastapi import HTTPException, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from upstash_redis.asyncio import Redis
 
+from celery_app import celery_app  # Import celery_app here  # Import celery_app
 from crawler_pool import cancel_crawler
 from crawlstore import setCrawlOperation, updateCrawlOperation
 from firestore import FirebaseClient, db
-from monitor import WorkerMonitor
 from redisCache import REDIS_CHANNEL
+from schemas import CrawlOperation
 from scrape import should_process_tasks
-from utils import FilterType, TaskStatus, _get_memory_mb, convert_celery_status, create_task_status_response, decode_redis_hash, is_task_id, should_cleanup_task, task_status_color
-from celery_app import celery_app # Import celery_app
-from tasks import crawl_stream_task, crawl_task, llm_extraction_task # Import Celery tasks
+from tasks import (  # Import Celery tasks
+    crawl_stream_task,
+    crawl_task,
+    llm_extraction_task,
+)
+from utils import (
+    FilterType,
+    TaskStatus,
+    _get_memory_mb,
+    convert_celery_status,
+    create_task_status_response,
+    decode_redis_hash,
+    is_task_id,
+    should_cleanup_task,
+    task_status_color,
+)
+from worker_monitor import WorkerMonitor
 
 logger = logging.getLogger(__name__)
 # At module level

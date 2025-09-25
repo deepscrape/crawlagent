@@ -27,7 +27,7 @@ fi
 
 # Start x11vnc with auth in the background
 # Bind to localhost; expose only via websockify
-x11vnc -display :99 ${AUTH_ARGS} -forever -shared -rfbport 5900 -localhost -quiet &
+x11vnc -display :99 ${AUTH_ARGS} -forever -shared -rfbport 5900 -listen 0.0.0.0 -quiet &
 X11VNC_PID=$!
 
 # Define cleanup function
@@ -72,12 +72,19 @@ else
   echo "Running as app process, starting all services"
   # Start noVNC only for app process
   if [ -d "/opt/noVNC" ]; then
-    /opt/noVNC/utils/websockify/run --web /opt/noVNC 0.0.0.0:6080 localhost:5900 &
+    /opt/noVNC/utils/websockify/run --web /opt/noVNC 0.0.0.0:6080 localost:5900 &
     NOVNC_PID=$!
   else
     NOVNC_PID=""
   fi
 fi
+
+# Log networking information for debugging
+echo "🔍 Network interfaces:"
+ip addr | grep -E "inet "
+
+echo "✅ Starting main process with command: $@"
+echo "🌐 Make sure your app listens on 0.0.0.0:8000, not just 127.0.0.1:8000"
 
 # Execute the main command passed to the entrypoint
 exec "$@"

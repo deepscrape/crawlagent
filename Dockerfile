@@ -106,8 +106,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     git \
     # Add sudo for X11 management
+    iproute2 \
     && git clone --depth 1 https://github.com/novnc/noVNC /opt/noVNC \
     && git clone --depth 1 https://github.com/novnc/websockify /opt/noVNC/utils/websockify \
+    && curl -L https://github.com/danihodovic/celery-exporter/releases/download/latest/celery-exporter -o ./celery-exporter \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
@@ -126,7 +128,7 @@ COPY --from=builder ${APP_HOME}/requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements.txt && \
     uv pip install --system playwright && \
-    playwright install --with-deps chromium
+    playwright install --with-deps
 
 # Verify installations
 RUN python -c "import crawl4ai; print('✅ crawl4ai is ready to rock!')" && \
@@ -143,7 +145,7 @@ COPY --chown=appuser:appuser config.yml .
 RUN crawl4ai-doctor
 
 # Expose ports
-EXPOSE 8000 9222 6080
+EXPOSE 8000 9222 6080 9808
 
 # Healthcheck dont need, fly io do this for us
 # HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
@@ -153,6 +155,8 @@ EXPOSE 8000 9222 6080
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
     chown root:root /usr/local/bin/docker-entrypoint.sh && \
+    chmod +x ./celery-exporter && \
+    chown root:root ./celery-exporter && \
     ls -la /usr/local/bin/docker-entrypoint.sh  # Verify permissions
 
 # Switch to non-root user
@@ -161,5 +165,5 @@ USER appuser
 # Set the entrypoint
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Start application
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets"]
+# Start application Run Uvicorn with proxy header support:
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws", "websockets"]

@@ -88,6 +88,9 @@ crawler:
       - "--disable-web-security"
       - "--allow-insecure-localhost"
       - "--ignore-certificate-errors"
+    launch_args:
+      - "--remote-debugging-address=0.0.0.0"
+      - "--remote-debugging-port=9222"
 
 # Logging Configuration
 logging:

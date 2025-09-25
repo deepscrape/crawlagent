@@ -1,49 +1,37 @@
 import asyncio
-
-from contextlib import asynccontextmanager
-from functools import wraps
 import logging
 import os
-from pathlib import Path
 import sys
 import time
+from contextlib import asynccontextmanager
+from functools import wraps
+from pathlib import Path
 from typing import Any, Callable
 
 # from typing import Annotated  # noqa: F401
 from crawl4ai import AsyncWebCrawler, BrowserConfig
-from fastapi import (
-    Depends,
-    FastAPI,
-    HTTPException,
-    Request,
-    WebSocket,
-    status
-)
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.exceptions import RequestValidationError
-from starlette.datastructures import Address # Import Address
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+
 # prometheus fast api
-from prometheus_fastapi_instrumentator import Instrumentator
-
+from starlette.datastructures import Address  # Import Address
 from upstash_ratelimit.asyncio import Ratelimit
-
-
-from utils import periodic_client_cleanup
-from redisCache import default_limiter, test_connection, redis, pure_redis
-from crawler_pool import close_all, get_crawler, janitor
-import uvicorn
 
 # from crawl import on_browser_created
 # from actions import infinite_scroll, load_more  # noqa: F401
 from auth import get_token_dependency
+from crawler_pool import close_all, get_crawler, janitor
+from job import init_job_router
+from monitoring import _init_metrics_app
+from redisCache import default_limiter, redis, test_connection
 
 # Use uvloop for enhanced performance
-from utils import load_config, setup_logging
-from job import init_job_router
+from utils import load_config, periodic_client_cleanup, setup_logging
 
 # ── internal imports (after sys.path append) ─────────────────
 # sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -70,40 +58,54 @@ GLOBAL_SEM = asyncio.Semaphore(MAX_PAGES)
 
 orig_arun = AsyncWebCrawler.arun
 
+
 async def capped_arun(self, *a, **kw):
     async with GLOBAL_SEM:
         return await orig_arun(self, *a, **kw)
+
+
 AsyncWebCrawler.arun = capped_arun
 
 
 orig_arun_many = AsyncWebCrawler.arun_many
 
+
 async def capped_arun_many(self, urls, config=None, dispatcher=None, **kwargs):
     async with GLOBAL_SEM:
         return await orig_arun_many(self, urls, config, dispatcher, **kwargs)
+
+
 AsyncWebCrawler.arun_many = capped_arun_many
 
 
 # Set the number of workers
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", os.cpu_count() or 1))
 
-# Store connected WebSocket clients    
+# Store connected WebSocket clients
 socket_client: set[WebSocket] = set()
 
 if sys.platform != "win32":
     import uvloop  # type: ignore
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 else:
     from asyncio import WindowsProactorEventLoopPolicy as EventLoopPolicy
+
     asyncio.set_event_loop_policy(EventLoopPolicy())
     # logger.warning("uvloop is not supported on Windows, using default(auto) event loop")
 
 production = os.getenv("PYTHON_ENV", "development").lower() == "production"
 if production:
-    print("\033[94mINFO-SERVER:\033[0m  \033[92mRunning in Production mode. PYTHON_ENV\033[0m", production)
+    print(
+        "\033[94mINFO-SERVER:\033[0m  \033[92mRunning in Production mode. PYTHON_ENV\033[0m",
+        production,
+    )
 else:
-    print("\033[94mWARNIN-SERVER:\033[92m Running in Development mode. PYTHON_ENV", production)
-    
+    print(
+        "\033[94mWARNIN-SERVER:\033[92m Running in Development mode. PYTHON_ENV",
+        production,
+    )
+
 ###############################################################
 # ───────────────────── FastAPI lifespan ──────────────────────
 ###############################################################
@@ -113,14 +115,18 @@ else:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
-        await get_crawler(BrowserConfig(
-            extra_args=config["crawler"]["browser"].get("extra_args", []),
-            **config["crawler"]["browser"].get("kwargs", {}),
-        ))           # warm‑up
-        await test_connection(redis) # Moved from on_event("startup")
+        await get_crawler(
+            BrowserConfig(
+                extra_args=config["crawler"]["browser"].get("extra_args", []),
+                **config["crawler"]["browser"].get("kwargs", {}),
+            )
+        )  # warm‑up
+        await test_connection(redis)  # Moved from on_event("startup")
         # await test_connection(pure_redis) # Moved from on_event("startup")
-        app.state.janitor = asyncio.create_task(janitor())        # idle GC
-        app.state.websocket = asyncio.create_task(periodic_client_cleanup(socket_client))
+        app.state.janitor = asyncio.create_task(janitor())  # idle GC
+        app.state.websocket = asyncio.create_task(
+            periodic_client_cleanup(socket_client)
+        )
         yield
     except Exception as e:
         logger.error(f"Startup failed: {e}", exc_info=True)
@@ -150,6 +156,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     client: Address | None = request.client
@@ -161,13 +168,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"detail": "Rate limit exceeded. Please try again later."},
-            headers=exc.headers
+            headers=exc.headers,
         )
     return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail},
-        headers=exc.headers
+        status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers
     )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -192,45 +198,41 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # Define the rate limiting decorator
-def rate_limited(
-    rate: int = 1,
-    limiter: Ratelimit = default_limiter
-) -> Callable:
+def rate_limited(rate: int = 1, limiter: Ratelimit = default_limiter) -> Callable:
     """Rate limiting decorator for FastAPI endpoints.
-    
+
     Args:
         limit: Rate limit string (e.g. "100/minute", "1000/hour")
         limiter: Rate limiter instance to use (defaults to default_limiter)
-    
+
     Returns:
         Decorator function that applies rate limiting
     """
-    def decorator(func: Callable) -> Callable:
 
+    def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
             # Extract Request object
             request = next(
-                (arg for arg in args if isinstance(arg, Request)),
-                kwargs.get('request')
+                (arg for arg in args if isinstance(arg, Request)), kwargs.get("request")
             )
-            
+
             if not request:
                 raise ValueError("Request parameter not found in function arguments")
 
             # Create unique identifier for this request
             client_ip = request.client.host if request.client else "unknown"
             identifier = f"{client_ip}:{request.url.path}"
-            
+
             print(f"Rate limit identifier: {identifier}")
             # Apply rate limiting
             response = await limiter.limit(identifier, rate)
-            
+
             # Add rate limit headers to response
             request.state.ratelimit = {
                 "limit": response.limit,
                 "remaining": response.remaining,
-                "reset": response.reset
+                "reset": response.reset,
             }
 
             if not response.allowed:
@@ -241,18 +243,21 @@ def rate_limited(
                         "Retry-After": str(response.reset),
                         "X-RateLimit-Limit": str(response.limit),
                         "X-RateLimit-Remaining": "0",
-                        "X-RateLimit-Reset": str(response.reset)
-                    }
+                        "X-RateLimit-Reset": str(response.reset),
+                    },
                 )
 
             return await func(*args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
 ################################################################
 # ───────────────────── FastAPI Security ───────────────────────
 ################################################################
+
 
 def _setup_security(app_: FastAPI):
     sec = config["security"]
@@ -261,15 +266,13 @@ def _setup_security(app_: FastAPI):
     if sec.get("https_redirect"):
         app_.add_middleware(HTTPSRedirectMiddleware)
     if sec.get("trusted_hosts", []) != ["*"]:
-        app_.add_middleware(
-            TrustedHostMiddleware, allowed_hosts=sec["trusted_hosts"]
-        )
+        app_.add_middleware(TrustedHostMiddleware, allowed_hosts=sec["trusted_hosts"])
+
 
 _setup_security(app)
 
 # setup Prometheus metrics and health check endpoints
-if config["observability"]["prometheus"]["enabled"]:
-    Instrumentator().instrument(app).expose(app)
+_init_metrics_app(app, config)
 
 
 # Set the token dependency for token verification, jwt if enabled from config file
@@ -279,9 +282,9 @@ verify_token = get_token_dependency(config)
 # ───────────────────── FastAPI middlewares ──────────────────────
 ################################################################
 
+
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
-    
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
@@ -290,6 +293,7 @@ async def add_process_time_header(request: Request, call_next):
     print(f"Request: {request.url.path} - Response time: {process_time * 1000:.2f} ms")
     return response
 
+
 # security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -297,6 +301,7 @@ async def add_security_headers(request: Request, call_next):
     if config["security"]["enabled"]:
         resp.headers.update(config["security"]["headers"])
     return resp
+
 
 # Middleware to apply default rate limiting
 @app.middleware("http")
@@ -308,21 +313,21 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
 
     # Use client IP as the identifier
-    client: Address | None = request.client # Explicitly type client
+    client: Address | None = request.client  # Explicitly type client
     client_ip = "unknown"
     if client is not None and client.host is not None:
         client_ip = client.host
     identifier = f"{client_ip}:{request.url.path}"
-    
+
     # Apply default rate limiting
     response = await default_limiter.limit(identifier)
     response.remaining
-    logger.info(f"Rate limiting for {identifier}, Remaining: {response.remaining}" )
+    logger.info(f"Rate limiting for {identifier}, Remaining: {response.remaining}")
     # Add rate limit headers to response
     request.state.ratelimit = {
         "limit": response.limit,
         "remaining": response.remaining,
-        "reset": response.reset
+        "reset": response.reset,
     }
 
     if not response.allowed:
@@ -334,23 +339,28 @@ async def rate_limit_middleware(request: Request, call_next):
                 "Retry-After": str(response.reset),
                 "X-RateLimit-Limit": str(response.limit),
                 "X-RateLimit-Remaining": "0",
-                "X-RateLimit-Reset": str(response.reset)
-            }
+                "X-RateLimit-Reset": str(response.reset),
+            },
         )
-    
+
     # If allowed, proceed with the request
     response = await call_next(request)
-        
+
     # Add rate limit headers to the response
     response.headers["X-RateLimit-Limit"] = str(request.state.ratelimit["limit"])
-    response.headers["X-RateLimit-Remaining"] = str(request.state.ratelimit["remaining"])
+    response.headers["X-RateLimit-Remaining"] = str(
+        request.state.ratelimit["remaining"]
+    )
     response.headers["X-RateLimit-Reset"] = str(request.state.ratelimit["reset"])
     return response
+
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config["app"].get("cors_origins" if production else "cors_origins_dev", ["*"]),
+    allow_origins=config["app"].get(
+        "cors_origins" if production else "cors_origins_dev", ["*"]
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -371,6 +381,7 @@ app.add_middleware(GZipMiddleware, minimum_size=config["app"].get("minimum_size"
 # ── job router ────────────────────────────────────────────── init_job_router(redis, config, verify_token, socket_client)
 app.include_router(router=init_job_router(config, socket_client))
 
+
 # startup router
 @app.get("/")
 async def root(decoded_token: bool = Depends(verify_token)):
@@ -379,23 +390,29 @@ async def root(decoded_token: bool = Depends(verify_token)):
         "message": "WebSocket server is running. Connect to /ws/events or /events for stream-events"
     }
 
+
 # health check endpoint
-@app.get(config["observability"]["health_check"]["endpoint"])
 @app.get(config["observability"]["health_check"]["endpoint"])
 async def health(_: Request):
     """Health check endpoint."""
     try:
-        return JSONResponse({"status": "ok", "timestamp": time.time(), "version": __version__})
-    
+        return JSONResponse(
+            {"status": "ok", "timestamp": time.time(), "version": __version__}
+        )
+
     except Exception:
         logger.exception("Health check failed")
         # Do not expose internal error details to clients
-        return JSONResponse({"status": "error"}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return JSONResponse(
+            {"status": "error"}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
 
 # prometheus metrics endpoint
 @app.get(config["observability"]["prometheus"]["endpoint"])
 async def metrics():
     return RedirectResponse(config["observability"]["prometheus"]["endpoint"])
+
 
 ################################################################
 # ────────────────────────── cli ──────────────────────────────
@@ -407,7 +424,7 @@ if __name__ == "__main__":
     #     import winloop
     #     winloop.install()
     #     loop = asyncio.get_event_loop()
-        # logger.info("Using winloop event loop", loop.run_forever())
+    # logger.info("Using winloop event loop", loop.run_forever())
 
     # Winloop's eventlooppolicy will be passed to uvicorn after this point...
     uvicorn.run(
@@ -415,7 +432,9 @@ if __name__ == "__main__":
         host=config["app"]["host"],
         port=config["app"]["port"],
         reload=config["app"]["reload"],
-        loop=config["app"]["uvloop"] if sys.platform == "win32" else "uvloop", # force uvloop on unix
+        loop=config["app"]["uvloop"]
+        if sys.platform == "win32"
+        else "uvloop",  # force uvloop on unix
         timeout_keep_alive=config["app"]["timeout_keep_alive"],
         workers=int(config["app"]["workers"] or NUM_WORKERS),
     )

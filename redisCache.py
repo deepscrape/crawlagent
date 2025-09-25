@@ -26,7 +26,10 @@ REDIS_USERNAME = os.environ.get("UPSTASH_REDIS_USER")
 REDIS_PASSWORD = os.environ.get("UPSTASH_REDIS_PASS")
 
 # not all([redis_url, redis_token, REDIS_PORT, REDIS_USERNAME, REDIS_PASSWORD]):
-if not redis_url or not redis_token or not REDIS_PORT or not REDIS_USERNAME or not REDIS_PASSWORD:
+if (
+    not redis_url or not redis_token or not REDIS_PORT or 
+    not REDIS_USERNAME or not REDIS_PASSWORD
+):
     missing = [
         name for name, val in [
            ("UPSTASH_REDIS_REST_URL", redis_url),
@@ -38,7 +41,10 @@ if not redis_url or not redis_token or not REDIS_PORT or not REDIS_USERNAME or n
     ]
     raise ValueError(f"Missing required Redis env vars: {', '.join(missing)}")
 
-REDIS_URL = urlparse(redis_url).hostname or redis_url.replace("https://", "").replace("http://", "")
+REDIS_URL = (
+    urlparse(redis_url).hostname 
+    or redis_url.replace("https://", "").replace("http://", "")
+)
 
 # ────────────────── redis client  ──────────────────
 # Initialize Redis client with Upstash credentials

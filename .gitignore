@@ -19,5 +19,7 @@ env/
 .vscode/
 
 /*.env
+/*.venv
 
 /*regions.md
+uv.lock
