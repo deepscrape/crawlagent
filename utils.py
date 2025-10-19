@@ -1,52 +1,38 @@
 import ast
 import asyncio
-from datetime import datetime
+import inspect
 import json
 import logging
 import os
+import random
 import re
-from fastapi import WebSocket
+import subprocess
+import typing
+import urllib.parse
+from contextlib import asynccontextmanager
+from datetime import datetime
+from functools import wraps
+from pathlib import Path
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union, cast
+
+import crawl4ai as _c4
 import psutil
+import yaml
+from celery.result import AsyncResult  # Moved to function scope to avoid circular dependency
+from fastapi import HTTPException, Request
+
 # from upstash_redis.asyncio import Redis
 from redis.asyncio import Redis  # Use redis.asyncio for async Redis operations 
-import yaml
-from celery.result import AsyncResult # Moved to function scope to avoid circular dependency
-from enum import Enum
-from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, Optional
-import crawl4ai as _c4
-import urllib.parse
-import random
+from upstash_ratelimit.asyncio import Ratelimit
 
-from redisCache import redis_xadd
+from enums import CeleryTaskStatus, TaskStatus
+from monitoring import manager
+from redisCache import default_limiter
+from schemas import CrawlConfigValidResponse, SystemTaskStats
+from validators import BrowserConfigValidator, CrawlerRunConfigValidator, SeedingConfigValidator
 
-logger = logging.getLogger(__name__)
-
-class TaskStatus(str, Enum):
-    READY = "Ready"
-    STARTED = "Started"
-    SCHEDULED = "Scheduled"
-    IN_PROGRESS = "In Progress"
-    PENDING = "Pending"
-    CANCELED = "Canceled"
-    REVOKED = "Revoked"
-    RETRY = "Retry"
-    COMPLETED = "Completed"
-    FAILED = "Failed"
-
-class CeleryTaskStatus(str, Enum):
-    PENDING = "PENDING"
-    STARTED = "STARTED"
-    SUCCESS = "SUCCESS"
-    FAILURE = "FAILURE"
-    RETRY = "RETRY"
-    REVOKED = "REVOKED"
-
-class FilterType(str, Enum):
-    RAW = "raw"
-    FIT = "fit"
-    BM25 = "bm25"
-    LLM = "llm"
+logger = logging.getLogger("crawlagent")
+production = os.getenv("PYTHON_ENV", "development").lower() == "production"
 
 def load_config() -> Dict:
     """
@@ -84,30 +70,55 @@ def load_config() -> Dict:
         logger.error(f"Error loading config: {e}")
         return {}
 
-def setup_logging(config: Dict) -> None:
-    """Configure application logging."""
-    logging.basicConfig(
-        level=config["logging"]["level"],
-        format=config["logging"]["format"]
-    )
-async def remove_stale_clients(socket_client: set[WebSocket]) -> None:
-    """Remove stale WebSocket clients."""
-    
-    disconnected_clients:set[WebSocket] = set()
-    for client in socket_client:
-        try:
-            await client.send_text("ping")  # Ping the client
-        except Exception:
-            disconnected_clients.add(client)
-    for client in disconnected_clients:
-        socket_client.remove(client)
+def setup_logging(config: dict) -> None:
+    if not config.get("logging", {}).get("enabled", True):
+        logging.disable(logging.CRITICAL)
+    else:
+        logging.basicConfig(
+            level=config.get("logging", {}).get("level", "INFO"),
+            format=config.get("logging", {}).get("format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"),
+            datefmt=config.get("logging", {}).get("datefmt", "%Y-%m-%d %H:%M:%S"),
+        )
 
-async def periodic_client_cleanup(socket_client) -> None:
+def datetime_handler(obj: Any) -> Optional[str]:
+    """Handle datetime serialization for JSON."""
+    if hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    
+async def remove_stale_clients(now) -> None:
+    """Remove stale WebSocket clients."""
+     # Find inactive connections (idle for more than 5 minutes)
+    inactive_connections = []
+    for conn_id, conn in manager.active_connections.items():
+        if (now - conn["last_activity"]).total_seconds() > 300:  # 5 minutes
+            inactive_connections.append(conn_id)
+
+    # Log inactive connections
+    if inactive_connections:
+        logger.info(f"Found {len(inactive_connections)} inactive connections")
+
+     # Optionally disconnect inactive connections
+        for conn_id in inactive_connections:
+            manager.disconnect(conn_id)
+            # socket_client.remove(client)
+
+    # disconnected_clients:set[WebSocket] = set()
+    # for client in socket_client:
+    #     try:
+    #         await client.send_text("ping")  # Ping the client
+    #     except Exception:
+    #         disconnected_clients.add(client)
+    # for client in disconnected_clients:
+    #     socket_client.remove(client)
+
+async def periodic_client_cleanup() -> None:
     """Periodically check and remove stale clients."""
     while True:
         logging.info("Checking for stale clients...")
-        await asyncio.sleep(60)  # Check every minute
-        await remove_stale_clients(socket_client)
+        await asyncio.sleep(30)  # Check every minute
+        now = datetime.now()
+        await remove_stale_clients(now)
 
 def is_task_id(value: str) -> bool:
     """Check if the value matches task ID pattern."""
@@ -143,16 +154,44 @@ def safe_eval_config(expr: str) -> dict:
                {"__builtins__": {}}, safe_env)
     return obj.dump()
 
-def datetime_handler(obj: any) -> Optional[str]: # type: ignore
-    """Handle datetime serialization for JSON, with a fallback for other types."""
-    if hasattr(obj, 'isoformat'):
-        return obj.isoformat()
-    # Fallback for other non-JSON-serializable types, converting them to string
+def is_config_valid(browser_config: Dict | None, 
+                    crawler_config: Dict | None,
+                    seeder_config: Dict | None,
+                    ):
+    """
+    Validate browser and crawler configurations.
+    Returns a FastAPI JSONResponse with details about which config is valid/invalid.
+    """
+    errors: Dict = {}
+
+    # Validate browser config
     try:
-        return str(obj)
-    except Exception:
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-    
+        if browser_config:
+            BrowserConfigValidator.validate(browser_config)
+    except Exception as e:
+        errors["browser_config"] = str(e)
+
+    # Validate crawler config
+    try:
+        if crawler_config:    
+            CrawlerRunConfigValidator.validate(crawler_config)
+    except Exception as e:
+        errors["crawler_config"] = str(e)
+
+    try:
+        if seeder_config:
+            SeedingConfigValidator.validate(seeder_config)
+    except Exception as e:
+        errors["seeder_config"] = str(e)
+
+    is_valid = not errors
+    result = CrawlConfigValidResponse(
+        is_valid=is_valid,
+        errors=errors if errors else None
+    )
+    status_code = 200 if is_valid else 422
+    return JSONResponse(content=result.model_dump(), status_code=status_code)
+
 def should_cleanup_task(created_at: str, ttl_seconds: int = 3600) -> bool:
     """Check if task should be cleaned up based on creation time."""
     created = datetime.fromisoformat(created_at)
@@ -271,8 +310,6 @@ def create_task_status_response(celery_task: AsyncResult, task: Dict[str, str], 
 
 async def stream_results(crawler: _c4.AsyncWebCrawler, results_gen: AsyncGenerator) -> AsyncGenerator[bytes, None]:
     """Stream results with heartbeats and completion markers."""
-    import json
-    from utils import datetime_handler
 
     try:
         async for result in results_gen:
@@ -302,7 +339,8 @@ async def stream_results(crawler: _c4.AsyncWebCrawler, results_gen: AsyncGenerat
 
 
 
-async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGenerator, chunk_size: int = 2048) -> bool:
+async def stream_add_crawl_results(redis: Redis, channel: str, results_gen: AsyncGenerator,
+                                chunk_size: int = 4096) -> bool:
     """
     Publish results to a Redis stream using pipeline batching.
     Each result is published as a stream entry in batches.
@@ -313,19 +351,22 @@ async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGe
     
     result: _c4.CrawlResult
     complete = {"status": "ok", "message": "completed"}
-    # buffer: list[dict[str, Any]] = []
+
     pipe2 = redis.pipeline()
     try:
         async for result in results_gen:
             try:
                 server_memory_mb = _get_memory_mb()
-                result.html = ""  # Clear HTML content to reduce size
+                if hasattr(result, "html"):
+                    result.html = ""  # Clear HTML content to reduce size
+                    result_dict = result.model_dump()
+                    result_dict["html"] = ""  # type: ignore
+     
+                # Convert result to dict if it's a CrawlResult, otherwise use as is
+                result_dict = result.model_dump() if hasattr(result, "model_dump") else dict(result)
                 
-                result_dict = result.model_dump()
-                # remove html from result before sending to redis
-
-                result_dict["html"] = ""  # type: ignore
                 result_dict['server_memory_mb'] = server_memory_mb
+
                 # result_dict['status'] = "model_dump"
                 url = result_dict.get('url', 'unknown')
 
@@ -342,7 +383,7 @@ async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGe
 
                 batch_json = json.dumps(model_dump, default=datetime_handler, ensure_ascii=False)
                 pipe = redis.pipeline()
-                chunk_size = 4096  # Define chunk_size as a constant (adjust as needed)
+                # chunk_size = 4096  # Define chunk_size as a constant (adjust as needed)
                 total_chunks = (len(batch_json) + chunk_size - 1) // chunk_size  # Calculate total chunks
                 # Split batch_json into chunks of chunk_size
                 for i in range(0, len(batch_json), chunk_size):
@@ -362,7 +403,9 @@ async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGe
                 logger.error(f"Serialization error: {e}")
                 error_response = {"status": "error", "message": str(e), "url": getattr(result, 'url', 'unknown')}
                 
-                pipe2.xadd(channel, {key: str(value) if isinstance(value, bool) else value  for key, value in error_response.items() } )
+                pipe2.xadd(channel, {key: str(value) if isinstance(value, bool) else value 
+                                     for key, value in error_response.items()
+                                     } )
                 complete = {"status": "error", "message": "completed"}
 
         pipe2.xadd(channel, {key: str(value) if isinstance(value, bool) else value  for key, value in complete.items()})
@@ -371,7 +414,7 @@ async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGe
         logger.warning("Client disconnected during streaming")
         pipe2.xadd(channel, {"status": "canceled", "message": "streaming canceled"})
     except Exception as e:
-        logger.error(f"Unexpected error in stream_pubsub_results: {e}")
+        logger.error(f"Unexpected error in stream_add_crawl_results: {e}")
         pipe2.xadd(channel, {"status": "error", "message": str(e)})
         await pipe2.execute()
         return False
@@ -379,6 +422,75 @@ async def stream_pubsub_results(redis: Redis, channel: str, results_gen: AsyncGe
     await pipe2.execute()
     return True
 
+
+async def stream_seeder_results(redis: Redis, channel: str, results,
+                                chunk_size: int = 4096) -> bool:
+    """
+    Publish results to a Redis stream using pipeline batching.
+    Each result is published as a stream entry in batches.
+    Error entries are published if serialization fails.
+    A final 'completed' marker is always published.
+    Returns a list of successfully published result dicts.
+    """
+    
+    complete = {"status": "ok", "message": "completed"}
+
+    pipe2 = redis.pipeline()
+    try:
+        print(f"all results are {len(results)}!!!")
+        for result in results:
+            try:                
+                # Convert result to dict if it's a CrawlResult, otherwise use as is
+
+                # result_dict['status'] = "model_dump"
+                url = result.get('url', 'unknown')
+
+                logger.info(f"Publishing result for {url}")
+                if isinstance(result, dict):
+                    logger.info(f"Publishing result for {result.get('domain', 'unknown')}")
+                else:
+                    raise ValueError(result)
+
+                batch_json = json.dumps(result, default=datetime_handler, ensure_ascii=False)
+                pipe = redis.pipeline()
+                # chunk_size = 4096  # Define chunk_size as a constant (adjust as needed)
+                total_chunks = (len(batch_json) + chunk_size - 1) // chunk_size  # Calculate total chunks
+                # Split batch_json into chunks of chunk_size
+                for i in range(0, len(batch_json), chunk_size):
+                    chunk = batch_json[i:i+chunk_size]
+                    pipe.xadd(channel, {
+                        "status": "ok",
+                        "message": "processing",
+                        "type": "batch_chunk",
+                        "url": url,
+                        "chunk_index": str(i // chunk_size),
+                        "total_chunks": str(total_chunks),  # Add total_chunks attribute
+                        "dump": chunk #.encode("utf-8") if isinstance(chunk, str) else chunk
+                    })
+                await pipe.execute()
+
+            except Exception as e:
+                logger.error(f"Serialization error: {e}")
+                error_response = {"status": "error", "message": str(e), "url": getattr(result, 'url', 'unknown')}
+                
+                pipe2.xadd(channel, {key: str(value) if isinstance(value, bool) else value 
+                                     for key, value in error_response.items()
+                                     } )
+                complete = {"status": "error", "message": "completed"}
+
+        pipe2.xadd(channel, {key: str(value) if isinstance(value, bool) else value  for key, value in complete.items()})
+
+    except asyncio.CancelledError:
+        logger.warning("Client disconnected during streaming")
+        pipe2.xadd(channel, {"status": "canceled", "message": "streaming canceled"})
+    except Exception as e:
+        logger.error(f"Unexpected error in stream_seeder_results: {e}")
+        pipe2.xadd(channel, {"status": "error", "message": str(e)})
+        await pipe2.execute()
+        return False
+
+    await pipe2.execute()
+    return True
 
 async def retry_async(func, *args, retries=3, base_delay=0.5, max_delay=5, **kwargs):
     """Retry async function with exponential backoff and jitter."""
@@ -397,3 +509,158 @@ async def retry_async(func, *args, retries=3, base_delay=0.5, max_delay=5, **kwa
         raise last_exception
     # This case should ideally not be reached if retries > 0 and func always raises on failure
     raise RuntimeError("Function failed after multiple retries without capturing an exception.")
+
+# Define the rate limiting decorator
+def rate_limited(rate: int = 1, limiter: Ratelimit = default_limiter) -> Callable:
+    """Rate limiting decorator for FastAPI endpoints.
+
+    Args:
+        limit: Rate limit string (e.g. "100/minute", "1000/hour")
+        limiter: Rate limiter instance to use (defaults to default_limiter)
+
+    Returns:
+        Decorator function that applies rate limiting
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> Any:
+            # Extract Request object
+            request = next(
+                (arg for arg in args if isinstance(arg, Request)), kwargs.get("request")
+            )
+
+            if not request:
+                raise ValueError("Request parameter not found in function arguments")
+
+            # Create unique identifier for this request
+            client_ip = request.client.host if request.client else "unknown"
+            identifier = f"{client_ip}:{request.url.path}"
+
+            print(f"Rate limit identifier: {identifier}")
+            # Apply rate limiting
+            response = await limiter.limit(identifier, rate)
+
+            # Add rate limit headers to response
+            request.state.ratelimit = {
+                "limit": response.limit,
+                "remaining": response.remaining,
+                "reset": response.reset,
+            }
+
+            if not response.allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Rate limit exceeded",
+                    headers={
+                        "Retry-After": str(response.reset),
+                        "X-RateLimit-Limit": str(response.limit),
+                        "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Reset": str(response.reset),
+                    },
+                )
+
+            return await func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+def read_proxies_from_file(file_path: str) -> List[str]:
+    proxies = []
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if "://" in line:
+                protocol, address = line.split("://", 1)
+            else:
+                address = line
+                protocol = "http"
+            if "@" in address:
+                auth, server = address.split("@", 1)
+                username, password = auth.split(":", 1)
+                ip, port = server.split(":", 1)
+                proxies.append(f"{ip}:{port}:{username}:{password}")
+            else:
+                ip, port = address.split(":", 1)
+                proxies.append(f"{ip}:{port}")
+    return proxies
+    
+import concurrent.futures
+import time
+import socket
+from fastapi.responses import JSONResponse
+
+def test_proxy_socket(proxy: str, timeout: float = 3.0) -> bool:
+    """Test if a proxy is reachable by opening a socket connection."""
+    try:
+        # Handle proxies with or without authentication
+        if "@" in proxy:
+            # Format: ip:port:username:password or ip:port@username:password
+            parts = proxy.split(":")
+            ip, port = parts[0], int(parts[1])
+        else:
+            ip, port = proxy.split(":")
+            port = int(port)
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception as e:
+        logger.warning(f"Proxy {proxy} not reachable: {e}")
+        return False
+
+
+def create_proxies_config(file_path: str) -> Optional[List[_c4.ProxyConfig]]:
+    proxy_list = read_proxies_from_file(file_path)
+    if not proxy_list:
+        print("No proxies found in proxies_list.txt")
+        return None
+
+    # Test proxies using socket connection
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(test_proxy_socket, proxy_list))
+        working_proxies = [proxy for proxy, ok in zip(proxy_list, results, strict=True) if ok]
+
+    if not working_proxies:
+        print("No working proxies found.")
+        return None
+
+    proxies_config: List[_c4.ProxyConfig] = [_c4.ProxyConfig.from_string(proxy) for proxy in cast(List, working_proxies)]
+    print(f"Working proxies: {working_proxies}")
+    return proxies_config
+
+
+@asynccontextmanager
+async def measure_stats(stats: Optional[SystemTaskStats] = None, logger=None, label="operation"):
+    start_mem_mb = _get_memory_mb()
+    start_time = time.time()
+    peak_mem_mb = start_mem_mb
+    mem_delta_mb = None
+    try:
+        yield
+    finally:
+        end_mem_mb = _get_memory_mb()
+        end_time = time.time()
+        total_time = end_time - start_time
+        if start_mem_mb is not None and end_mem_mb is not None:
+            mem_delta_mb = end_mem_mb - start_mem_mb
+            peak_mem_mb = max(peak_mem_mb if peak_mem_mb else 0, end_mem_mb)
+        if stats is not None:
+            stats.end_time = end_time
+            stats.start_time = start_time
+            stats.duration = total_time
+            stats.start_mem_mb = start_mem_mb
+            stats.end_mem_mb = end_mem_mb
+            stats.mem_delta_mb = mem_delta_mb
+            stats.peak_mem_mb = peak_mem_mb
+        if logger:
+            logger.info(
+                f"[{label}] Memory usage: Start: {start_mem_mb} MB, End: {end_mem_mb} MB, "
+                f"Delta: {mem_delta_mb} MB, Peak: {peak_mem_mb} MB, Total Time: {total_time:.2f}s"
+            )
+
+def get_wsl2_host_ip():
+    try:
+        route = subprocess.check_output("ip route | grep default", shell=True).decode()
+        return route.split()[2]
+    except Exception:
+        return "127.0.0.1"
