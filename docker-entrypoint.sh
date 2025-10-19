@@ -86,5 +86,5 @@ ip addr | grep -E "inet "
 echo "✅ Starting main process with command: $@"
 echo "🌐 Make sure your app listens on 0.0.0.0:8000, not just 127.0.0.1:8000"
 
-# Execute the main command passed to the entrypoint
+# Execute the main command passed to the entrypoint within xvfb-run
 exec "$@"
