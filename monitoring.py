@@ -1,9 +1,126 @@
 # monitoring.py
+import logging
 import os
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from prometheus_client import CollectorRegistry, make_asgi_app, multiprocess
 from prometheus_fastapi_instrumentator import Instrumentator, metrics
+
+from grafana import WEBSOCKET_CONNECTIONS, WEBSOCKET_MESSAGES_RECEIVED, WEBSOCKET_MESSAGES_SENT
+
+logger = logging.getLogger("crawlagent")
+
+# Advanced WebSocket Monitoring
+# Per-Connection Metrics
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, Dict] = {}
+        self.connection_stats: Dict = {
+            "total_connections": 0,
+            "active_connections": 0,
+            "messages_received": 0,
+            "messages_sent": 0,
+        }
+        
+    async def connect(self, websocket: WebSocket, client_id: str, session_id: Optional[str] = None, metadata: Optional[dict] = None):
+        await websocket.accept()
+        connection_id = str(uuid.uuid4())
+        
+        # Initialize connection data
+        connection_data = {
+            "websocket": websocket,
+            "client_id": client_id,
+            "connected_at": datetime.now(),
+            "messages_received": 0,
+            "messages_sent": 0,
+            "last_activity": datetime.now(),
+        }
+        
+        # Add session_id if provided
+        if session_id:
+            connection_data["session_id"] = session_id
+            
+        # Add any additional metadata
+        if metadata:
+            connection_data.update(metadata)
+            
+        self.active_connections[connection_id] = connection_data
+        self.connection_stats["total_connections"] += 1
+        self.connection_stats["active_connections"] += 1
+        WEBSOCKET_CONNECTIONS.inc()
+        return connection_id
+        
+    def disconnect(self, connection_id: str):
+        if connection_id in self.active_connections:
+            del self.active_connections[connection_id]
+            self.connection_stats["active_connections"] -= 1
+            WEBSOCKET_CONNECTIONS.dec()
+        
+    async def send_personal_message(self, message: Any, connection_id: str):
+        if connection_id in self.active_connections:
+            await self.active_connections[connection_id]["websocket"].send_json(message)
+            self.active_connections[connection_id]["messages_sent"] += 1
+            self.active_connections[connection_id]["last_activity"] = datetime.now()
+            self.connection_stats["messages_sent"] += 1
+            WEBSOCKET_MESSAGES_SENT.inc()
+        
+    async def broadcast(self, message: Any):
+        for _, connection in self.active_connections.items():
+            await connection["websocket"].send_json(message)
+            connection["messages_sent"] += 1
+            connection["last_activity"] = datetime.now()
+            self.connection_stats["messages_sent"] += 1
+    def record_message_received(self, connection_id: str):
+        if connection_id in self.active_connections:
+            self.active_connections[connection_id]["messages_received"] += 1
+            self.active_connections[connection_id]["last_activity"] = datetime.now()
+            self.connection_stats["messages_received"] += 1
+            WEBSOCKET_MESSAGES_RECEIVED.inc()
+            
+    def get_connection_by_session_id(self, session_id: str):
+        """Get a connection by its associated session ID"""
+        for conn_id, conn in self.active_connections.items():
+            if conn.get("session_id") == session_id:
+                return conn_id, conn
+        return None, None
+        
+    def get_websocket_by_session_id(self, session_id: str) -> Optional[WebSocket]:
+        """Get the WebSocket object for a given session ID"""
+        _, conn = self.get_connection_by_session_id(session_id)
+        if conn:
+            return conn.get("websocket", None)
+        return None
+        
+    async def send_message_by_session_id(self, message: Any, session_id: str) -> bool:
+        """Send a message to a WebSocket by session ID instead of connection ID"""
+        conn_id, conn = self.get_connection_by_session_id(session_id)
+        if conn_id and conn:
+            await self.send_personal_message(message, conn_id)
+            return True
+        return False
+    
+    def get_stats(self):
+        connection_details = []
+        for conn_id, conn in self.active_connections.items():
+            connection_details.append({
+                "connection_id": conn_id,
+                "client_id": conn["client_id"],
+                "connected_at": conn["connected_at"].isoformat(),
+                "messages_received": conn["messages_received"],
+                "messages_sent": conn["messages_sent"],
+                "last_activity": conn["last_activity"].isoformat(),
+                "duration": (datetime.now() - conn["connected_at"]).total_seconds()
+            })
+            
+        return {
+            "global_stats": self.connection_stats,
+            "connections": connection_details
+        }
+manager = ConnectionManager()
+
 
 
 def create_instrumentator():
@@ -26,7 +143,7 @@ def create_instrumentator():
     return instr
 
 
-def _init_metrics_app(app: FastAPI, config: dict):
+def init_metrics_app(app: FastAPI, config: dict):
     prometheus_cfg = config.get("observability", {}).get("prometheus", {})
     metrics_enabled = prometheus_cfg.get("enabled", False)
     metrics_endpoint = prometheus_cfg.get("endpoint", "/metrics")
