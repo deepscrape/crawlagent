@@ -1,16 +1,16 @@
+import json
 import os
 import signal
 import sys
-from dotenv import load_dotenv
+
+import firebase_admin
 import firebase_admin.auth
 import firebase_admin.firestore
-import firebase_admin
+from dotenv import load_dotenv
 from firebase_admin import credentials
-import json
 
-# Determine which .env file to load
-production = os.getenv("PYTHON_ENV", "development").lower() == "production"
-env_file = ".env" if production else "dev.env"
+from config import env_file, production
+
 # Load environment variables
 load_dotenv(env_file)
 # config = load_config()
@@ -74,7 +74,13 @@ class FirebaseClient:
 
         # Print a message indicating that Firestore has been initialized
         print(
-            f"\033[94mINFO-DB:\033[0m  \033[92mFirestore initialized by\033[0m \033[95m{dbName}\033[0m \033[94mdatabase\033[0m pid: {os.getpid()} {self.db}"
+            (
+                f"\033[94mINFO-DB:\033[0m  "
+                f"\033[92mFirestore initialized by\033[0m "
+                f"\033[95m{dbName}\033[0m "
+                f"\033[94mdatabase\033[0m "
+                f"pid: {os.getpid()} {self.db.project}"
+            )
         )
 
         return (self.db, self.auth)

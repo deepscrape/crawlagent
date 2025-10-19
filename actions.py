@@ -1,9 +1,23 @@
-import os
-from crawl4ai import AsyncWebCrawler, CacheMode, CrawlResult, CrawlerMonitor, ExtractionStrategy, LLMConfig, LLMExtractionStrategy, LXMLWebScrapingStrategy, MemoryAdaptiveDispatcher, RateLimiter
+import logging
+import re
+from typing import cast
+
+from crawl4ai import (
+    AsyncWebCrawler,
+    CacheMode,
+    CrawlerMonitor,
+    CrawlResult,
+    ExtractionStrategy,
+    LLMConfig,
+    LLMExtractionStrategy,
+    LXMLWebScrapingStrategy,
+    MemoryAdaptiveDispatcher,
+    RateLimiter,
+)
 from crawl4ai.async_configs import CrawlerRunConfig
 from pydantic import BaseModel, Field
 
-
+logger = logging.getLogger("crawlagent")
 
 async def infinite_scroll(
     crawler: AsyncWebCrawler,
@@ -25,10 +39,10 @@ async def infinite_scroll(
         markdown_generator=markdown_generator,
     )
 
-    result: CrawlResult = await crawler.arun(
+    result = cast(CrawlResult, await crawler.arun(
         url=url,  # "https://lnk.bio/akis_petretzikis"
         config=next_config,
-    )
+    ))
 
     # selectors = auto_detect_selectors_with_dynamic_attributes(result.html)
     # print("CSS Selectors:", selectors['css_selectors'])
@@ -57,7 +71,7 @@ async def infinite_scroll(
     )
 
     # use second time
-    result2 = await crawler.arun(url=url, config=next_config1)
+    result2 = cast(CrawlResult, await crawler.arun(url=url, config=next_config1))
 
     # Step 3: Extract data from the page
     # Access different media types
@@ -102,6 +116,7 @@ async def infinite_scroll(
 async def load_more(
     crawler: AsyncWebCrawler,
     markdown_generator,
+    proxy_rotation_strategy,
     url="https://www.scrapingcourse.com/button-click",
     session_id="hn_session",
 ):
@@ -113,10 +128,12 @@ async def load_more(
 
     # Step 1: Load initial commits
     next_config = CrawlerRunConfig(
+        scraping_strategy=LXMLWebScrapingStrategy(),
         wait_for=wait_condition,
         session_id=session_id,
         cache_mode=CacheMode.BYPASS,
         markdown_generator=markdown_generator,
+        proxy_rotation_strategy=proxy_rotation_strategy,
         # Not using js_only yet since it's our first load
     )
 
@@ -139,12 +156,12 @@ async def load_more(
     #     # override_navigator=True,  # Override navigator properties
     # )   # Default crawl run configuration
 
-    result = await crawler.arun(url=url, config=next_config)
+    result = cast (CrawlResult, await crawler.arun(url=url, config=next_config))
 
     selector = "button#load-more-btn"
     pages_to_load = 3
-    items = result.cleaned_html.count("product-image")
-    print("Initial products loaded. Count:", result.cleaned_html.count("product-image"))
+    items = result.cleaned_html.count("product-image") if result.cleaned_html else 0
+    # print("Initial products loaded. Count:", result.cleaned_html.count("product-image") if result.cleaned_html else 0)
 
     # Step 2: For subsequent pages, we run JS to click 'Next Page' if it exists
     js_next_page = f""" 
@@ -162,6 +179,7 @@ async def load_more(
 
     for page in range(1):  # let's do 2 more "Next" pages
         config_next = CrawlerRunConfig(
+            scraping_strategy=LXMLWebScrapingStrategy(),
             session_id=session_id,
             js_code=[
                 js_next_page,
@@ -172,12 +190,13 @@ async def load_more(
             js_only=True,  # We're continuing from the open tab
             cache_mode=CacheMode.BYPASS,
             markdown_generator=markdown_generator,
+            proxy_rotation_strategy=proxy_rotation_strategy,
             # magic=True,  # Enable magic mode
             # scan_full_page=True,   # Enables scrolling
             # scroll_delay=2, # Waits 200ms between scrolls (optional)
         )
-        result2 = await crawler.arun(url=url, config=config_next)
-        print(f"Page {page + 2} items count:", result2.cleaned_html)
+        result2 = cast(CrawlResult, await crawler.arun(url=url, config=config_next))
+        logger.info(f"Page {page + 2} items count:")
         # # Step 3: Extract data from the page
         # # Access different media types
         # images = result2.media["images"]  # List of image details
@@ -212,12 +231,25 @@ async def load_more(
 
         # print("After scroll+click, length:", len(result2.html))
         # total_items = result2.html
+        ip_match = re.search(r'(?:[0-9]{1,3}\.){3}[0-9]{1,3}', result.html)
+        current_proxy = config_next.proxy_config if config_next.proxy_config else None
+
+        if current_proxy and ip_match:
+            print(f"URL {result.url}")
+            print(f"Proxy {current_proxy.server} -> Response IP: {ip_match.group(0)}")
+            verified = ip_match.group(0) == current_proxy.ip
+            if verified:
+                print(f"✅ Proxy working! IP matches: {current_proxy.ip}")
+            else:
+                print("❌ Proxy failed or IP mismatch!")
+        print("---")
         return result2
 
 
 async def basic_crawl(
     crawler: AsyncWebCrawler,
     markdown_generator,
+    proxy_rotation_strategy = None,
     url="https://www.scrapingcourse.com/button-click",
     session_id="hn_session",
     llm_strategy = None,
@@ -231,18 +263,19 @@ async def basic_crawl(
 
     # Step 1: Load initial commits
     next_config = CrawlerRunConfig(
-        scraping_strategy=LXMLWebScrapingStrategy(),
+        # scraping_strategy=LXMLWebScrapingStrategy(),
         stream=stream,  # Enable streaming
         # wait_for=wait_condition,
         session_id=session_id,
         cache_mode=CacheMode.BYPASS,
-        magic=True,  # Enable magic mode
+        # magic=True,  # Enable magic mode
         markdown_generator=markdown_generator,
         # wait_for_images=True,  # Add this argument to ensure images are fully loaded
         # process_iframes=True, # Extract iframe content
         # remove_overlay_elements=True,  # Remove popups/modals that might block iframe
         # simulate_user=True, # Simulate human behavior
         # override_navigator=True,  # Override navigator properties
+        # proxy_rotation_strategy=proxy_rotation_strategy,
         exclude_external_links=True,
         exclude_social_media_links=True,
         extraction_strategy=llm_strategy
@@ -256,7 +289,7 @@ async def basic_crawl(
         monitor=CrawlerMonitor(enable_ui=True),
     )
 
-    result2 = await crawler.arun(url=url, config=next_config)
+    result2 = cast(CrawlResult, await crawler.arun(url=url, config=next_config))
 
     # config_next1 = CrawlerRunConfig(
     #     session_id=session_id,

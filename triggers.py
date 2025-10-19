@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Optional, Sequence, cast
+
 from crawl4ai import (
     AsyncWebCrawler,
     BrowserConfig,
@@ -9,18 +11,20 @@ from crawl4ai import (
     DefaultMarkdownGenerator,
     LLMConfig,
     LLMExtractionStrategy,
+    ProxyConfig,
     PruningContentFilter,
+    RoundRobinProxyStrategy,
 )
 from fastapi import HTTPException
 
-from actions import basic_crawl, basic_stream_crawl  # , infinite_scroll
 # from dynamic_selectors import auto_detect_selectors
-
 from pydantic import BaseModel, Field
 
+from actions import basic_crawl, basic_stream_crawl, infinite_scroll, load_more  # , 
+from crawler_pool import cancel_crawler, get_crawler
 from schemas import OpenAIModelFee
 
-
+logger = logging.getLogger("crawlagent")
 # This class likely represents a product entity and inherits from a base model class.
 class Product(BaseModel):
     name: str
@@ -282,3 +286,43 @@ async def basic_crawl_operation(
             status_code=500,
             detail="Internal Server Error while returning array buffer.",
         )
+
+
+async def test_crawl(browser: AsyncWebCrawler, sign: str, proxies: Optional[List[ProxyConfig]]) -> bool:
+
+    try:
+        
+        # set default markdownGenerator
+        markdown_generator = DefaultMarkdownGenerator(
+            content_filter=PruningContentFilter(
+                # Lower → more content retained, higher → more content pruned
+                threshold=0.45,
+                # "fixed" or "dynamic"
+                threshold_type="dynamic",
+                # Ignore nodes with <5 words
+                min_word_threshold=5,
+            ),  # In case you need fit_markdown
+        )
+
+        proxy_rotation_strategy = RoundRobinProxyStrategy(cast(List, proxies)) if proxies else None
+
+        result = await basic_crawl(
+            crawler=browser,
+            markdown_generator=markdown_generator,
+            proxy_rotation_strategy=proxy_rotation_strategy,
+        )
+
+        if result and result.success:
+            content_length = len(result.cleaned_html) if result.cleaned_html is not None else 0
+            logger.info("Crawl successful. Content length: %d", content_length)
+        else:
+            error_message = result.error_message if result is not None and hasattr(result, "error_message") else "Unknown error"
+            logger.warning("Crawl failed with error: %s", error_message)
+        
+        # await cancel_crawler(sign)  # Remove the crawler to free resources
+        return result.success if result else False
+    except Exception as e:
+        # Make sure to close crawler if started during an error here
+        if 'crawler' in locals() and browser.ready:
+            logger.error(f"Error closing crawler during stream setup exception: {str(e)}")
+        raise RuntimeError from e

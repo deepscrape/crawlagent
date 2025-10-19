@@ -18,6 +18,8 @@ env_file = ".env" if production else "dev.env"
 # Load environment variables
 load_dotenv(env_file, verbose=True)
 
+logger = logging.getLogger("crawlagent")
+
 # Celery needs a URI for broker and backend, even if we're passing an instance.
 # For Upstash Redis, the URL is typically what's needed.
 # We'll use the URL from redisCache.py's environment 
@@ -66,7 +68,7 @@ celery_app.conf.update(
     enable_utc=True,
     task_soft_time_limit=600,  # Soft time limit: 10 minutes
     task_time_limit=900,      # Hard time limit: 15 minutes
-    result_expires=3600,      # Expire results after 1 hour to avoid memory bloat
+    result_expires=0,      # Expire results after 1 hour to avoid memory bloat 3600 or 0
     # Enable Celery events (so exporter can observe tasks)
     worker_send_task_events = True,
     task_send_sent_event = True,
@@ -93,7 +95,7 @@ celery_app.conf.update(
 if os.name == 'nt':
     # Windows doesn't support SIGKILL/SIGTERM the same way
     def windows_shutdown_handler(*args):
-        print("Windows shutdown signal received")
+        logger.info("Windows shutdown signal received")
         celery_app.control.broadcast('shutdown')
         sys.exit(0)
 

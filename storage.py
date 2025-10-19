@@ -1,15 +1,16 @@
-from datetime import datetime, timezone
-import os
-from typing import Any, Dict, Optional, List
-import aioboto3
-import zstandard as zstd
-import pydantic
-import logging
 import asyncio
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import aioboto3
+import pydantic
+import zstandard as zstd
 from botocore.exceptions import ClientError
 
 # Set up logging
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("crawlagent")
 
 class TigrisBucketResult(pydantic.BaseModel):
     key_name: str

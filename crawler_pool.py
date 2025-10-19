@@ -1,15 +1,17 @@
 # crawler_pool.py  (new file)
 import asyncio
-import json
 import hashlib
+import json
 import time
-import psutil
 from contextlib import suppress
 from typing import Dict
-from crawl4ai import AsyncWebCrawler, BrowserConfig
-from utils import load_config 
 
-CONFIG = load_config()
+import psutil
+from crawl4ai import AsyncWebCrawler, BrowserConfig
+
+from config import config
+
+CONFIG = config
 
 POOL: Dict[str, AsyncWebCrawler] = {}
 LAST_USED: Dict[str, float] = {}
@@ -47,6 +49,15 @@ async def get_crawler(cfg: BrowserConfig) -> tuple[AsyncWebCrawler, str]:
             # If we failed to start the browser, we should remove it from the pool
             POOL.pop(sig, None)
             LAST_USED.pop(sig, None)
+
+# If you want to explicitly check and reuse a browser by its signature:
+async def reuse_browser_by_sig(sig: str, cfg: BrowserConfig) -> tuple[AsyncWebCrawler, str]:
+    async with LOCK:
+        if sig in POOL:
+            LAST_USED[sig] = time.time()  # Update last used time
+            return POOL[sig], sig               # Return the browser instance
+
+    return await get_crawler(cfg)  # Attempt to create a new one if not found
 
 async def cancel_crawler(sign: str):
     async with LOCK:

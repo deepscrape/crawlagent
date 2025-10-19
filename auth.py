@@ -1,8 +1,10 @@
+import os
 from typing import Callable, Dict
+
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from firestore import auth
 
+from firestore import auth
 
 security = HTTPBearer()
 
@@ -14,26 +16,31 @@ def verify_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Security(security),
 ) -> Dict:
-    """Verify the bearer token against environment variable."""
-    
+    """Verify the bearer token against environment variable or Firebase.
+
+    Simple JWT verification. Expects header like "Bearer <token>"
+    Returns decoded payload or raises HTTPException.
+    """
     try:
-        if credentials is None:
-            return None
-        
-        if not credentials or not credentials.credentials:
-            raise HTTPException(status_code=401, detail="Authorization header missing")
+        if credentials is None or not credentials.credentials:
+            raise HTTPException(status_code=401, detail="missing authorization")
+
+        if credentials.scheme is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="invalid authorization header")
 
         token = credentials.credentials
- 
+
+
+        # Fallback to Firebase token verification
         decoded_token = auth.verify_id_token(token)
         request.state.user = decoded_token
-
-        # Set uid separately for convenience
         request.state.uid = decoded_token.get("uid")
-        
         return decoded_token
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    except HTTPException:
+        raise
+    except Exception as err:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from err
 
 
 def get_token_dependency(config: Dict) -> Callable:

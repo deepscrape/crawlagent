@@ -1,3 +1,6 @@
+import logging
+
+logger = logging.getLogger("crawlagent")
 async def updateCrawlOperation(userId, operation_id, data, db):
     try:
         # Update Firestore document
@@ -37,7 +40,7 @@ async def setCrawlOperation(userId, data, db, doc_ref=None):
 async def getCrawlMetadata(metadataId, userId, db):
     """
 
-    Asynchronously updates a Firestore document for a user's crawl operation.
+    Synchronously updates a Firestore document for a user's crawl operation.
 
     Parameters:
 

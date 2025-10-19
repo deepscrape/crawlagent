@@ -1,13 +1,20 @@
 # for async use
-import os
-from typing import List, Optional
-from dotenv import load_dotenv
-# from redis.asyncio import Redis
-from upstash_ratelimit.asyncio import Ratelimit, FixedWindow, TokenBucket
-from upstash_redis.asyncio import Redis
-from redis.asyncio import Redis as PureRedis
 import asyncio
+import logging
+import os
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+from fastapi import HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from redis.asyncio import Redis as PureRedis
+
+# from redis.asyncio import Redis
+from upstash_ratelimit.asyncio import FixedWindow, Ratelimit, TokenBucket
+from upstash_redis.asyncio import Redis
+
+logger = logging.getLogger("crawlagent")
 
 REDIS_CHANNEL = "stream_channel"  # Default channel for streaming data
 
@@ -51,7 +58,7 @@ REDIS_URL = (
 redis = Redis(
     url=redis_url,
     token=redis_token,
-    allow_telemetry=False,  # Disable telemetry if not needed
+    allow_telemetry=production,  # Disable telemetry if not needed
 )
 
 # Initialize PureRedis client for pub/sub operations
@@ -97,7 +104,13 @@ default_limiter = Ratelimit(
 # Custom rate limiter: 5 requests per 60 seconds
 custom_limiter = Ratelimit(
     redis=redis,
-    limiter=FixedWindow(max_requests=1, window=60),
+    limiter=FixedWindow(max_requests=2, window=60),
+    prefix="@upstash/ratelimit"
+)
+
+custom_websocket_limiter = Ratelimit(
+    redis=redis,
+    limiter=TokenBucket(max_tokens=1, refill_rate=1, interval=2),
     prefix="@upstash/ratelimit"
 )
 
@@ -135,7 +148,6 @@ async def redis_subscribe(redis: Redis, channel: str):
     if not channel:
         print("\033[91mERROR-DB:\033[0m Channel is empty.")
         return None
-    redis.publish
 
     try:
         await redis_execute(redis, ["SUBSCRIBE", channel])
@@ -215,9 +227,9 @@ async def redis_xread(redis: Redis | PureRedis, streams: dict, count: Optional[i
         if block is not None:
             command.extend(["BLOCK", str(block)])
         command.append("STREAMS")
-        for channel, last_id in streams.items():
+        for channel, _ in streams.items():
             command.append(channel)
-        for channel, last_id in streams.items():
+        for _, last_id in streams.items():
             command.append(last_id)
         # Flatten into varargs for the underlying client
         if isinstance(redis, Redis) and hasattr(redis, "execute"):
