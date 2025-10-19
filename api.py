@@ -47,19 +47,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from upstash_redis.asyncio import Redis
 
 from celery_app import celery_app  # Import celery_app here  # Import celery_app
-from crawler_pool import cancel_crawler
+from crawler_pool import cancel_crawler, get_crawler
 from crawlstore import setCrawlOperation, updateCrawlOperation
+from enums import FilterType
 from firestore import FirebaseClient, db
 from redisCache import REDIS_CHANNEL
-from schemas import CrawlOperation
+from schemas import Author, CrawlOperation
 from scrape import should_process_tasks
 from tasks import (  # Import Celery tasks
     crawl_stream_task,
     crawl_task,
     llm_extraction_task,
+    seeder_multi_research_task,
 )
 from utils import (
-    FilterType,
     TaskStatus,
     _get_memory_mb,
     convert_celery_status,
@@ -71,7 +72,8 @@ from utils import (
 )
 from worker_monitor import WorkerMonitor
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("crawlagent")
+
 # At module level
 _firebase_client = None
 _db_instance = None
@@ -170,7 +172,65 @@ async def get_firebase_client():
 
 #     return {"operation_id": operation_id, "results": results}
 
+# 
+async def multi_domain_research_job(
+    redis: Redis,
+    uid: str,
+    base_url: str,
+    domains: List[str],
+    config: Dict[str, Any],
+    operation_data: Dict[str, Any],
+    task_options: Optional[Dict[str, Any]] = None,
+) -> JSONResponse:
+    """ Perform research on multiple domains concurrently. """
 
+
+    logger.info("Enqueuing seeder job for domains: %s", domains)
+    # print crawler_config
+    logger.info(f"Seeder config: {config}")
+
+    # data: CrawlOperation
+    doc_ref = db.collection(f"users/{uid}/operations").document()
+    operation_id = doc_ref.id
+
+    # Enqueue the task to Celery
+    task = seeder_multi_research_task.apply_async(args=[uid, operation_id, domains, config])
+    task_id = task.id  # Update task_id in case Celery changed it
+
+
+    status = TaskStatus.PENDING.value  # set status after celery assignment
+
+    operation_data['task_id'] = task_id  # Add the task ID to operation_data
+    operation_data['status'] = status  # Set status to pending in queue
+
+    # Store initial task details in Redis, signature will be updated by workers
+    asyncio.gather(
+        redis.hset(f"task:{task_id}", values={
+            "status": status, # Convert Enum to string
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "urls": json.dumps(domains, ensure_ascii=False),
+            "operation_id": operation_id,
+            "result": "",
+            "error": "",
+        }),
+        setCrawlOperation(uid, operation_data, db, doc_ref)
+    )
+    
+    return JSONResponse({
+        "task_id": task_id,
+        "operationId": operation_id,
+        "status": status, # Convert Enum to string
+        "_links": {
+            "self": {"href": f"{base_url}seeder/job/multi-research/{task_id}"},
+            "eresults": {"href": f"{base_url}crawl/stream/job/{task_id}/results"},
+            "results": {"href": f"{base_url}crawl/job/{task_id}/results"},
+            "estatus": {"href": f"{base_url}crawl/stream/job/{task_id}/status"},
+            "cancel": {"href": f"{base_url}crawl/job/{task_id}/cancel"}
+        }
+    })
+
+
+# ---------------- LLM job handler ---------------------------------
 async def handle_llm_request(
     redis: Redis,
     request: Request,
@@ -220,8 +280,7 @@ async def handle_llm_request(
         }, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-
-
+# ---------------- Markdown handler ---------------------------------
 async def handle_markdown_request(
     urls: List[str],
     filter_type: FilterType,
@@ -285,8 +344,6 @@ async def handle_markdown_request(
                 },  # Smaller viewport for better performance
             )
 
-        # Initialize the crawler
-        from crawler_pool import get_crawler
         crawler, _ = await get_crawler(browser) # Unpack the tuple
         
         results = []
@@ -347,65 +404,10 @@ async def handle_markdown_request(
                 "server_memory_delta_mb": mem_delta_mb,
                 "server_peak_memory_mb": max(peak_mem_mb if peak_mem_mb else 0, end_mem_mb_error or 0)
             })
-        )
+        ) from e
 
-async def handle_stream_crawl_request(
-    urls: List[str],
-    browser_config: dict,
-    crawler_config: dict,
-    config: dict
-) -> Tuple[AsyncWebCrawler, AsyncGenerator]:
-    """Handle streaming crawl requests."""
-    try:
-        browser_conf = BrowserConfig.load(browser_config)
-        # browser_config.verbose = True # Set to False or remove for production stress testing
-        browser_conf.verbose = False
-        crawler_conf = CrawlerRunConfig.load(crawler_config)
-        crawler_conf.scraping_strategy = LXMLWebScrapingStrategy()
-        crawler_conf.stream = True
 
-        crawler_cfg = (config.get("crawler") or {})
-        crl_cfg = (config.get("rate_limiter") or {})
-
-        dispatcher = MemoryAdaptiveDispatcher(
-            memory_threshold_percent=crawler_cfg.get("memory_threshold_percent", 80),
-             rate_limiter=RateLimiter(
-                base_delay=tuple(crl_cfg.get("base_delay", (0.2, 1.0)))
-            ) if crl_cfg.get("enabled", False) else None
-        )
-
-        from crawler_pool import get_crawler
-        bcrawler:tuple[AsyncWebCrawler, str] = await get_crawler(browser_conf)
-        crawler, _ = bcrawler
-        # crawler = AsyncWebCrawler(config=browser_config)
-        # await crawler.start()
-
-        results_gen: AsyncGenerator = cast(
-            AsyncGenerator,
-            await crawler.arun_many(
-            urls=urls,
-            config=crawler_conf,
-            dispatcher=dispatcher
-            )
-        )
-
-        return crawler, results_gen
-
-    except Exception as e:
-        # Make sure to close crawler if started during an error here
-        if 'crawler' in locals() and crawler.ready:
-            #  try:
-            #       await crawler.close()
-            #  except Exception as close_e:
-            #       logger.error(f"Error closing crawler during stream setup exception: {close_e}")
-            logger.error(f"Error closing crawler during stream setup exception: {str(e)}")
-        logger.error(f"Stream crawl error: {str(e)}", exc_info=True)
-        # Raising HTTPException here will prevent streaming response
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-    
+# ---------------- Crawler handler ---------------------------------
 async def handle_crawl_job(
     redis: Redis,
     urls: List[str],
@@ -436,7 +438,7 @@ async def handle_crawl_job(
     return {"task_id": task_id}
 
 async def handle_crawl_stream_job(
-        temp_task_id: str,
+        # temp_task_id: str,
         redis: Redis,
         uid: str,
         base_url: str,
@@ -463,44 +465,45 @@ async def handle_crawl_stream_job(
     operation_id = doc_ref.id
 
     # Enqueue the task to Celery
-    task = crawl_stream_task.delay(uid, operation_id, urls, browser_config, crawler_config)
+    task = crawl_stream_task.apply_async(args=[uid, operation_id, urls, browser_config, crawler_config])
 
     # get the celery task id
     task_id = task.id
 
+    status = TaskStatus.PENDING.value  # set status after celery assignment
     operation_data["task_id"] = task_id  # Add the task ID to operation_data
-
-    # save To firestore
-    await setCrawlOperation(uid, operation_data, db, doc_ref)
+    operation_data["status"] = status  # Set initial status
     
-    pipe = redis.pipeline()
+
     # this method is temporary, and is used for celery task cancelation 
-    pipe.hset(f"temp_task_id:{temp_task_id}", "celery_task_id", task_id)
+    # pipe.hset(f"temp_task_id:{temp_task_id}", "celery_task_id", task_id)
+    asyncio.gather(
+        # Store initial task details in Redis, signature will be updated by worker
+        redis.hset(f"task:{task_id}", values={
+            "status": status, # Convert Enum to string
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "urls": json.dumps(urls),
+            # "temp_task_id": temp_task_id,
+            "operation_id": operation_id,
+            "result": "",
+            "error": "",
+        })
 
-    # Store initial task details in Redis, signature will be updated by worker
-    pipe.hset(f"task:{task_id}", values={
-        "status": TaskStatus.IN_PROGRESS.value, # Convert Enum to string
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "urls": json.dumps(urls),
-        "temp_task_id": temp_task_id,
-        "operation_id": operation_id,
-        "result": "",
-        "error": "",
-    })
-
-    await pipe.exec()
-
+    
+                    ,
+                    # save To firestore
+                    setCrawlOperation(uid, operation_data, db, doc_ref))
 
     # return a json response by status and reference links
     return JSONResponse({
         "task_id": task_id,
-        "temp_task_id": temp_task_id,
+        # "temp_task_id": temp_task_id,
         "operationId": operation_id,
-        "status": TaskStatus.IN_PROGRESS.value, # Convert Enum to string
+        "status": status, # Convert Enum to string
         "_links": {
             "self": {"href": f"{base_url}crawl/stream/job/{task_id}"},
-            "status": {"href": f"{base_url}crawl/stream/job/{task_id}"},
-            "cancel": {"href": f"{base_url}crawl/job/cancel/{temp_task_id}"}
+            "status": {"href": f"{base_url}crawl/stream/job/status/{task_id}"},
+            "cancel": {"href": f"{base_url}crawl/job/{task_id}/cancel"}
         }
     })
 
@@ -513,15 +516,15 @@ async def handle_crawl_stream_job(
 async def cancel_a_job(
         redis: Redis,
         uid: str,
-        temp_task_id: str, 
+        task_id: str, 
         *,
         force: bool = False):
 
     """Cancel a running crawl job using Celery's revocation."""
     
-    response = {"status": "ok", "message": f"Task {temp_task_id} canceled successfully."}
+    response = {"status": "ok", "message": f"Task {task_id} canceled successfully."}
 
-    task_id = await redis.hget(key=f"temp_task_id:{temp_task_id}", field='celery_task_id')
+    # task_id = await redis.hget(key=f"temp_task_id:{temp_task_id}", field='celery_task_id')
     if isinstance(task_id, bytes):
         task_id = task_id.decode('utf-8')
 
@@ -567,7 +570,12 @@ async def cancel_a_job(
 
                 # if these two conditions approved break from loop
                 if celery_task.successful() or celery_task.failed():
-                    response = {"status": "warning", "message": f"The task {temp_task_id} can’t be canceled because it has already finished."}
+                    response = {
+                        "status": "warning",
+                        "message": (
+                            f"The task {task_id} can’t be canceled because it has already finished."
+                        ),
+                    }
                     break
 
                 # if task revoked or canceled
@@ -632,7 +640,7 @@ async def cancel_a_job(
     
     except Exception as e:
         logger.error(f"Error revoking Celery task {task_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to cancel task: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cancel task: {e}") from e
 
 async def handle_task_status(
     redis: Redis,
@@ -658,7 +666,7 @@ async def handle_task_status(
 
     # query celery task state by task id
     task = decode_redis_hash(task)
-    temp_task_id = task.get("temp_task_id")
+    
     response = create_task_status_response(celery_task, task, task_id, base_url)
 
     # remove task from redis keep metadata in firebase
@@ -669,8 +677,6 @@ async def handle_task_status(
             pipe.delete(f"task:{task_id}")
             pipe.delete(f"{REDIS_CHANNEL}:{task_id}")
             pipe.delete(f"celery-task-meta-{task_id}")
-            if temp_task_id:
-                pipe.delete(f"temp_task_id:{temp_task_id}")
             await pipe.exec()
 
     return JSONResponse(response)
@@ -681,9 +687,7 @@ async def handle_stream_task_status(
     base_url: str = "",
 ):
     """Stream status updates for a task."""
-    try:
-        task = decode_redis_hash(task)
-        
+    try:        
         async def stream_task_status():
             try:
                 while True:
