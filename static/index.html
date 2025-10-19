@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live Browser View</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #333; }
+        #video {
+            width: 100vw;
+            height: 100vh;
+            object-fit: contain; /* Ensures the video scales without cropping */
+            background-color: black;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <video id="video" autoplay playsinline webkit-playsinline></video>
+    <div id="status">Connecting...</div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const statusElement = document.getElementById('status');
+        let pc; // RTCPeerConnection
+        let ws; // WebSocket for input
+        let sessionId = null;
+        let token = "jwt_disabled"; // Replace with actual JWT if security is enabled
+
+        // Function to update status message
+        function updateStatus(message) {
+            statusElement.textContent = message;
+        }
+
+        async function start() {
+            updateStatus("Starting WebRTC connection...");
+            pc = new RTCPeerConnection();
+
+            pc.ontrack = (event) => {
+                if (event.track.kind === 'video') {
+                    videoElement.srcObject = event.streams[0];
+                    updateStatus("Video stream received.");
+                }
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                updateStatus(`ICE connection state: ${pc.iceConnectionState}`);
+                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'disconnected') {
+                    console.error("WebRTC connection failed or closed.");
+                    updateStatus("WebRTC connection failed. Please refresh.");
+                    if (ws) ws.close();
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                updateStatus(`WebRTC connection state: ${pc.connectionState}`);
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    // Send ICE candidates to the server if needed, though for simple cases,
+                    // the initial offer/answer exchange might be enough.
+                    // For now, we'll rely on the initial offer/answer.
+                }
+            };
+
+            try {
+                // IMPORTANT: Add this line to explicitly declare the intention to receive video
+                pc.addTransceiver('video', { direction: 'recvonly' })
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                updateStatus("Sending SDP offer to server...");
+                const response = await fetch(`/api/v1/ws/offer`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}` // Include JWT if needed
+                    },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(`Server error: ${response.status} - ${errorData.detail || response.statusText}`);
+                }
+
+                const answer = await response.json();
+                sessionId = answer.session_id;
+                updateStatus(`Received SDP answer. Session ID: ${sessionId}`);
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+                updateStatus("WebRTC connection established. Starting input WebSocket...");
+                connectWebSocket();
+
+            } catch (error) {
+                console.error("Error during WebRTC setup:", error);
+                updateStatus(`Error: ${error.message}. Please check console.`);
+            }
+        }
+
+        function connectWebSocket() {
+            if (!sessionId) {
+                console.error("No session ID available for WebSocket connection.");
+                updateStatus("Error: No session ID. Cannot connect input.");
+                return;
+            }
+
+            // Use secure WebSocket (wss) if served over HTTPS, otherwise ws
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/ws/${sessionId}?token=${token}`);
+
+            ws.onopen = () => {
+                updateStatus("Input WebSocket connected.");
+                console.log("Input WebSocket connected.");
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                console.log("WebSocket message:", msg);
+                if (msg.type === "js_result" || msg.type === "cdp_result") {
+                    console.log("Server result:", msg.result);
+                } else if (msg.error) {
+                    console.error("Server error:", msg.error);
+                }
+            };
+
+            ws.onclose = () => {
+                updateStatus("Input WebSocket disconnected.");
+                console.log("Input WebSocket disconnected.");
+            };
+
+            ws.onerror = (error) => {
+                console.error("Input WebSocket error:", error);
+                updateStatus("Input WebSocket error. Check console.");
+            };
+        }
+
+        // Function to send input commands via WebSocket
+        function sendInput(type, data) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type, ...data }));
+            } else {
+                console.warn("WebSocket not open, cannot send input:", type, data);
+            }
+        }
+
+        // Mouse input handling
+        videoElement.addEventListener('mousemove', (event) => {
+            const rect = videoElement.getBoundingClientRect();
+            const x = (event.clientX - rect.left) / rect.width * videoElement.videoWidth;
+            const y = (event.clientY - rect.top) / rect.height * videoElement.videoHeight;
+            sendInput('mouse_move', { x, y });
+        });
+
+        videoElement.addEventListener('click', (event) => {
+            const rect = videoElement.getBoundingClientRect();
+            const x = (event.clientX - rect.left) / rect.width * videoElement.videoWidth;
+            const y = (event.clientY - rect.top) / rect.height * videoElement.videoHeight;
+            sendInput('mouse_click', { x, y, button: 'left' });
+        });
+
+        // Keyboard input handling
+        document.addEventListener('keydown', (event) => {
+            // Prevent default browser actions for certain keys if needed
+            // event.preventDefault();
+            sendInput('key', { key: event.key });
+        });
+
+        // Start the process when the page loads
+        window.onload = start;
+    </script>
+</body>
+</html>
