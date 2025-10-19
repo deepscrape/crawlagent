@@ -1,12 +1,16 @@
 fastapi
+fastapi_limiter 
 gunicorn
 dotenv
 websockets
 uvicorn[standard]
 crawl4ai
 uvloop
-beautifulsoup4~=4.12
 tf-playwright-stealth>=1.1.0
+# playwright_stealth
+aiortc
+av 
+numpy
 firebase-admin
 google-cloud-firestore
 upstash-redis~=1.4.0
@@ -18,8 +22,10 @@ aiomultiprocess
 prometheus_client
 prometheus-fastapi-instrumentator
 prometheus-exporter-celery>=0.11.2
-redis[hiredis]
+redis[hiredis]>=5.0.4
+fastapi-cache2
 celery
 courlan
 aioboto3
 zstandard
+typing_extensions>=4.0.0

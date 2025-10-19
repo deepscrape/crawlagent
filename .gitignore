@@ -23,3 +23,6 @@ env/
 
 /*regions.md
 uv.lock
+/*.pkl
+crawl4ai_custom_context.md
+/*.bak

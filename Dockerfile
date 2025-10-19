@@ -12,7 +12,8 @@ ENV PYTHONFAULTHANDLER=1 \
     DEBIAN_FRONTEND=noninteractive \
     UV_COMPILE_BYTECODE=1 \
     UV_NO_INSTALLER_METADATA=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=600
 
 ARG APP_HOME=/app
 WORKDIR ${APP_HOME}
@@ -104,6 +105,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-3-0 \
     xvfb \
     x11vnc \
+    xserver-xorg-core \
+    ffmpeg \
+    x11-utils \
+    pciutils \
+    fluxbox \
     git \
     # Add sudo for X11 management
     iproute2 \
