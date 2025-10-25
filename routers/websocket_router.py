@@ -27,15 +27,27 @@ from fastapi import (
     status,
 )
 
-from apps.ffmpeg_cdp import FPS, HEIGHT, RTC_CONFIG, WIDTH, FFmpegRawVideoTrack, OfferModel, cleanup_session, start_ffmpeg
+from apps.ffmpeg_cdp import (
+    FPS,
+    HEIGHT,
+    RTC_CONFIG,
+    WIDTH,
+    CDPRawVideoTrack,
+    FFmpegRawVideoTrack,
+    OfferModel,
+    cleanup_session,
+    get_playwright_window_identifier,
+    start_ffmpeg,
+)
 from auth import get_token_dependency
 from celery_app import celery_app
-from config import config, get_websocket_custom_limiter
+from configure import config, get_websocket_custom_limiter
+from enums import CeleryTaskStatus
 from firestore import auth
-from monitoring import manager
+from monitoring import websocket_manager
 
 # from routers.browser_sessions import add_browser_endpoints # No longer needed
-from utils import CeleryTaskStatus, convert_celery_status
+from utils import convert_celery_status
 from virtual_display_manager import VirtualDisplayManager  # Import VirtualDisplayManager
 
 logger = logging.getLogger("crawlagent")
@@ -60,7 +72,7 @@ socket_router = APIRouter()
 verify_token = get_token_dependency(config)
 
 async def get_cookie_or_token(
-    websocket: WebSocket,
+    # websocket: WebSocket,
     session: Annotated[str | None, Cookie()] = None,
     token: Annotated[str | None, Query()] = None,
 ):
@@ -92,23 +104,23 @@ async def websocket_endpoint(
         # await websocket.accept()
         # _socket_client.add(websocket)
         client_id = cookie_or_token
-        connection_id = await manager.connect(websocket, client_id)
+        connection_id = await websocket_manager.connect(websocket, client_id)
         logger.info(f"Client {client_id} connected with connection_id {connection_id}")
-        await manager.send_personal_message("Hello, this is a server event!", connection_id)
-        await manager.broadcast(f"Client #{client_id} says: Hello, this is a server event!")
+        await websocket_manager.send_personal_message("Hello, this is a server event!", connection_id)
+        await websocket_manager.broadcast(f"Client #{client_id} says: Hello, this is a server event!")
         
     except WebSocketDisconnect as e:
         # _socket_client.remove(websocket)
-        await manager.broadcast(f"Client #{client_id} left the chat")
-        manager.disconnect(connection_id)
+        await websocket_manager.broadcast(f"Client #{client_id} left the chat")
+        websocket_manager.disconnect(connection_id)
         logger.info("WebSocket: Client disconnected", str(e))
     except Exception as e:
         logger.error(f"Error handling connection for {client_id}: {str(e)}", exc_info=True)
-        manager.disconnect(connection_id)
+        websocket_manager.disconnect(connection_id)
     finally:
         # _socket_client.discard(websocket)
-        await manager.broadcast(f"Client #{client_id} left the chat")
-        manager.disconnect(connection_id)
+        await websocket_manager.broadcast(f"Client #{client_id} left the chat")
+        websocket_manager.disconnect(connection_id)
         logger.info("WebSocket: Client disconnected (cleanup)")
 
 @socket_router.websocket("/task/status")
@@ -120,7 +132,7 @@ async def websocket_task_status(
     # await websocket.accept()
     # _socket_client.add(websocket)
     client_id = cookie_or_token
-    connection_id = await manager.connect(websocket, client_id)
+    connection_id = await websocket_manager.connect(websocket, client_id)
     logger.info(f"Client {client_id} connected with connection_id {connection_id}")
     poll_interval = .7
     active_tasks = set()
@@ -131,11 +143,11 @@ async def websocket_task_status(
             # Wait for new task_ids or a ping from the client
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=poll_interval)
-                manager.record_message_received(connection_id)
+                websocket_manager.record_message_received(connection_id)
                 task_ids = data.get("task_ids", [])
                 logger.debug(f"WebSocket: Client subscribed to task IDs: {task_ids[:50]}")
                 if not task_ids:
-                    await manager.send_personal_message({"error": "No task IDs provided"}, connection_id)       
+                    await websocket_manager.send_personal_message({"error": "No task IDs provided"}, connection_id)       
                     continue
                 # Update the set of tracked tasks
                 active_tasks = set(task_ids)
@@ -169,7 +181,7 @@ async def websocket_task_status(
 
             active_tasks -= completed_tasks
 
-            await manager.send_personal_message({"tasks": status_data}, connection_id)
+            await websocket_manager.send_personal_message({"tasks": status_data}, connection_id)
 
             # --- CLOSE CONNECTION IF ALL TASKS ARE DONE ---
             if not active_tasks:
@@ -181,11 +193,11 @@ async def websocket_task_status(
         logger.info("WebSocket: Client disconnected from task status tracking")
     except Exception as e:
         logger.error(f"Error in websocket task status: {str(e)}")
-        await manager.send_personal_message({"error": str(e)}, connection_id)
-        # await manager.broadcast(f"Client #{client_id} says: {{"error": str(e)}}")
+        await websocket_manager.send_personal_message({"error": str(e)}, connection_id)
+        # await websocket_manager.broadcast(f"Client #{client_id} says: {{"error": str(e)}}")
     finally:
         # _socket_client.discard(websocket)
-        manager.disconnect(connection_id)
+        websocket_manager.disconnect(connection_id)
         logger.info("WebSocket: Client disconnected from task status tracking (cleanup)")
 
 # ---------- FFmpeg + CDP app ----------
@@ -194,8 +206,7 @@ async def websocket_task_status(
 @socket_router.post("/offer")
 async def offer(
         offer: OfferModel, request: Request,
-        token: Any = Depends(verify_token)  # noqa: B008
-):
+        token: Any = Depends(verify_token)):
     """
     Client sends an SDP offer; server returns SDP answer and session_id.
     Authenticate with Firestore Authorization: Bearer <jwt>.
@@ -203,10 +214,9 @@ async def offer(
     This endpoint creates a new browser session with WebRTC streaming:
     1. Creates a peer connection for WebRTC
     2. Launches a headful Playwright browser
-    3. Starts FFmpeg to capture the browser display
+    3. Starts video streaming using CDPRawVideoTrack
     4. Creates and returns an SDP answer
     """
-    # Extract the user ID from the token for monitoring/logging
     user_id = token.get("uid", "unknown") if isinstance(token, dict) else "unknown"
     
     session_id = offer.session_id or str(uuid())
@@ -215,7 +225,7 @@ async def offer(
     pc = RTCPeerConnection(configuration=RTC_CONFIG)
 
     pcs[session_id] = pc
-    browser_manager_instance = None # Renamed to avoid conflict with monitoring.manager
+    browser_manager = None
 
     # Access VirtualDisplayManager from app.state
     virtual_display_manager: VirtualDisplayManager = request.app.state.virtual_display_manager
@@ -226,14 +236,13 @@ async def offer(
                     {pc.iceConnectionState}, signalingState: {pc.signalingState}")
         if pc.connectionState in ("failed", "closed", "disconnected"):
             logger.warning(f"WebRTC connection {session_id} state is {pc.connectionState}. Initiating cleanup.") 
-            # Pass virtual_display_manager to cleanup_session
-            await cleanup_session(session_id, pcs, page_store, ffmpeg_procs, virtual_display_manager)
+            await cleanup_session(session_id, pcs, page_store, virtual_display_manager, ffmpeg_procs)
 
     @pc.on("iceconnectionstatechange")
     def on_ice_state_change():
-        print("ICE state:", pc.iceConnectionState)
+        logger.info("ICE state: %s", pc.iceConnectionState)
     try:
-        is_windows = platform.system() == "Windows" # Use platform.system() for better OS detection
+        is_windows = platform.system() == "Windows"
         
         display_num = None
         debug_port = None
@@ -247,25 +256,11 @@ async def offer(
                 os.environ["DISPLAY"] = display_addr
             logger.info(f"Allocated virtual display {display_addr} and debug port {debug_port} for session {session_id}")
         else:
-            # On Windows, we don't use Xvfb, so just allocate a debug port
-            # For simplicity, we'll use a dummy display_num for tracking
-            # In a real scenario, you might want a different port allocation strategy for Windows
-            # or ensure Playwright's headless mode is sufficient.
-            # For now, we'll just increment a port.
-            # This part needs careful consideration for multi-browser on Windows without virtual displays.
-            # For this task, we'll assume headless is acceptable on Windows if no virtual display.
-            # Simple increment for Windows
             debug_port = virtual_display_manager.start_debug_port + len(virtual_display_manager.in_use_displays) 
             logger.info(f"Allocated debug port {debug_port} for session {session_id} on Windows.")
 
-
         browser_args = [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu", # Keep --disable-gpu for now, as GPU-backed virtual displays are complex
             f"--window-size={WIDTH},{HEIGHT}",
-            f"--remote-debugging-port={9222}" # Add debug port to browser args
         ]
         
         config_extra_args = config["crawler"]["browser"].get("extra_args", [])
@@ -279,22 +274,28 @@ async def offer(
         user_data_dir = tempfile.mkdtemp(prefix="crawl4ai-test-")
         logger.debug(f"Created temporary user data directory: {user_data_dir}")
 
+        # cdp_url = f"ws://localhost:{9222}/devtools/browser/" # Dynamically construct CDP URL
+        browser_type = "chromium"  # or "chromium", "firefox"
         browser_config = BrowserConfig(
-            use_managed_browser=True,
-            headless=False,  # Headless on Windows, headful on Linux with Xvfb
+            headless=True,
+            # browser_mode="docker",
+            viewport_height=HEIGHT,
+            viewport_width=WIDTH,
+            browser_type=browser_type,
             browser_mode="cdp",
-            user_data_dir=user_data_dir,
-            extra_args=browser_args,
+            # user_data_dir=user_data_dir,
+            # extra_args=browser_args,
+            # cdp_url=cdp_url # Pass dynamically constructed CDP URL
         )
         
-        browser_manager_instance = BrowserManager(browser_config=browser_config, logger=AsyncLogger(verbose=True, log_file=None))
-        await browser_manager_instance.start()
+        browser_manager = BrowserManager(browser_config=browser_config, logger=AsyncLogger(verbose=True, log_file=None))
+        await browser_manager.start()
 
         logger.info(f"Requesting page from crawler {session_id}")
         crawler_config = CrawlerRunConfig(session_id=session_id)
         try:
             # pc.addTransceiver("video", direction="sendonly")
-            page, _ = await browser_manager_instance.get_page(crawler_config)
+            page, _ = await browser_manager.get_page(crawler_config)
        
             if not page:
                 raise ValueError("Page initialization returned None")
@@ -306,47 +307,45 @@ async def offer(
         except Exception as e:
             logger.error(f"Exception in get_page: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Exception in get_page: {e}") from e
-        
+
+        video_track = CDPRawVideoTrack(page, session_id, width=WIDTH, height=HEIGHT, fps=FPS)
+        await video_track.start()
+        pc.addTrack(video_track)
+
         page_store[session_id] = {
             "page": page,
             "context": page.context,
-            "browser": browser_manager_instance.browser, 
-            "playwright": await browser_manager_instance.get_playwright(),
+            "browser": browser_manager.browser, 
+            "playwright": await browser_manager.get_playwright(),
             "user_id": user_id,
             "created_at": datetime.now().isoformat(),
-            "display_num": display_num, # Store display_num
-            "debug_port": debug_port,   # Store debug_port
-            "xvfb_process": xvfb_process # Store xvfb_process for cleanup
+            "display_num": display_num,
+            "debug_port": debug_port,
+            "xvfb_process": xvfb_process,
+            "video_track": video_track
         }
-
-        if not is_windows:
-            ff = await start_ffmpeg(display=display_addr, width=WIDTH, height=HEIGHT, fps=FPS) # Use allocated display_addr
-            if not ff.stdout:
-                # Pass virtual_display_manager to cleanup_session
-                await cleanup_session(session_id, pcs, page_store, ffmpeg_procs, virtual_display_manager)
-                raise HTTPException(status_code=500, detail="ffmpeg stdout not available")
-            
-            ffmpeg_procs[session_id] = ff
-            logger.info(f"Started ffmpeg with PID {ff.pid} for session {session_id}")
-
-            if ff and ff.stdout:
-                track = FFmpegRawVideoTrack(ff.stdout, width=WIDTH, height=HEIGHT, fps=FPS)
-                pc.addTrack(track)
-                logger.info(f"Added FFmpegRawVideoTrack to PeerConnection for session {session_id}")
-            else:
-                logger.error("FFmpeg process or stdout not available.")
-            # player = MediaPlayer(
-            #     'http://download.tsi.telecom-paristech.fr/' +
-            #     'gpac/dataset/dash/uhd/mux_sources/hevcds_720p30_2M.mp4')
-
-            # if player.video is not None:
-            #     pc.addTrack(player.video)
-            #     logger.info(f"Added FFmpeg video track to PeerConnection for session {session_id}")
-            # else:
-            #     logger.error("MediaPlayer did not return a video track.")
+        window_title = await get_playwright_window_identifier(page, browser_name=browser_type)
+        # Use allocated display_addr
+        ff = await start_ffmpeg(is_windows=is_windows, display=None 
+                                if is_windows else display_addr, width=WIDTH, height=HEIGHT, fps=FPS,
+                                  window_title=window_title) 
+        if not ff.stdout:
+            # Pass virtual_display_manager to cleanup_session
+            await cleanup_session(session_id, pcs, page_store, virtual_display_manager,ffmpeg_procs)
+            raise HTTPException(status_code=500, detail="ffmpeg stdout not available")
         
+        ffmpeg_procs[session_id] = ff
+        logger.info(f"Started ffmpeg with PID {ff.pid} for session {session_id}")
+
+
+        # if ff and ff.stdout:
+        #     track = FFmpegRawVideoTrack(ff.stdout, session_id=session_id, width=WIDTH, height=HEIGHT, fps=FPS)
+        #     pc.addTrack(track)
+        #     logger.info(f"Added FFmpegRawVideoTrack to PeerConnection for session {session_id}")
+        # else:
+        #     logger.error("FFmpeg process or stdout not available.")
+
         await pc.setRemoteDescription(offer_desc)
-        
         logger.debug(f"Creating SDP answer for session {session_id}")
         answer = await pc.createAnswer()
         logger.debug(f"SDP answer created for session {session_id}: {answer.sdp}")
@@ -370,9 +369,7 @@ async def offer(
         if display_num is not None:
             await virtual_display_manager.release_display_and_port(display_num)
         raise HTTPException(status_code=500, detail=f"Failed to create browser session: {e}") from e
-    
 
-# ---------- WebSocket for input (CDP via Playwright) ----------
 @socket_router.websocket("/{session_id}")
 async def ws_input(
     websocket: WebSocket, session_id: str,
@@ -393,18 +390,19 @@ async def ws_input(
     
     client_id = cookie_or_token
     # Connect and store session_id in the connection metadata
-    connection_id = await manager.connect(websocket, client_id, session_id=session_id)
+    connection_id = await websocket_manager.connect(websocket, client_id, session_id=session_id)
     logger.info(f"Client {client_id} connected with connection_id {connection_id} for session {session_id}")    
 
     try:
         while True:
             raw = await websocket.receive_text()
-            manager.record_message_received(connection_id)
+            # raw = await asyncio.wait_for(websocket.receive_json(), timeout=poll_interval)
+            websocket_manager.record_message_received(connection_id)
             msg = json.loads(raw)
             typ = msg.get("type")
             page_info = page_store.get(session_id)
             if not page_info:
-                await manager.send_personal_message({"error": "session not found"}, connection_id)
+                await websocket_manager.send_personal_message({"error": "session not found"}, connection_id)
                 continue
             page = page_info["page"]
 
@@ -424,7 +422,7 @@ async def ws_input(
                 script = msg.get("script")
                 # careful: sanitize or limit allowed scripts in prod
                 res = await page.evaluate(script)
-                await manager.send_personal_message({"type": "js_result", "result": res}, connection_id)        
+                await websocket_manager.send_personal_message({"type": "js_result", "result": res}, connection_id)        
             elif typ == "cdp":
                 # direct CDP call via Playwright CDP session
                 # msg: {type: 'cdp', method: 'Network.enable', params:{...}}
@@ -432,17 +430,17 @@ async def ws_input(
                 params = msg.get("params", {})
                 cdp = await page.context.new_cdp_session(page)
                 res = await cdp.send(method, params)
-                await manager.send_personal_message({"type": "cdp_result", "result": res}, connection_id)
+                await websocket_manager.send_personal_message({"type": "cdp_result", "result": res}, connection_id)
             else:
-                await manager.send_personal_message({"error": "unknown message type"}, connection_id)
+                await websocket_manager.send_personal_message({"error": "unknown message type"}, connection_id)
     except WebSocketDisconnect:
         logger.info(f"WebSocket: Client {client_id} disconnected from session {session_id}")
     except Exception as e:
         logger.error(f"Error in websocket input: {str(e)}")
-        await manager.send_personal_message({"error": str(e)}, connection_id)
+        await websocket_manager.send_personal_message({"error": str(e)}, connection_id)
     finally:
-        # No need to remove from ws_inputs as we're using the manager
-        manager.disconnect(connection_id)
+        # No need to remove from ws_inputs as we're using the websocket_manager
+        websocket_manager.disconnect(connection_id)
         logger.info(f"WebSocket: Client {client_id} disconnected from session {session_id} (cleanup)")
 
 # ---------- Browser Session Management Endpoints ----------

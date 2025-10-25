@@ -1,0 +1,18 @@
+// CrawlerAI Utilities Index
+// This file helps with code indexing and IDE navigation
+
+// Server utilities
+server_utils.py: Core server utilities including configuration, logging, memory management, 
+                 Redis interactions, async utilities, task management, rate limiting, and more.
+
+// WebRTC utilities
+webrtc_utils.py: Utilities for WebRTC connections, especially in WSL environments.
+                 Includes ICE server configuration, connectivity testing, and firewall setup.
+
+// WSL utilities
+wsl_utils.py: Utilities specific to Windows Subsystem for Linux.
+              Includes port forwarding checks and network diagnostics.
+
+// Package exports
+__init__.py: Organizes and exports all utility functions from the various modules.
+             Functions are categorized by purpose for easier import.
