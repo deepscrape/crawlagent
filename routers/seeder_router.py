@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from api import multi_domain_research_job
 from apps.seeder import SeederRequest
 from auth import get_token_dependency
-from config import config
+from configure import config
 from redisCache import REDIS_CHANNEL, pure_redis, redis
 from schemas import CrawlOperation
 

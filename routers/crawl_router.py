@@ -14,7 +14,7 @@ from api import (
     handle_task_status,
 )
 from auth import get_token_dependency
-from config import config
+from configure import config
 from crawl import reader
 from redisCache import REDIS_CHANNEL, pure_redis, redis
 from schemas import CrawlConfigValidRequest, CrawlRequest, MarkdownRequest, RawCode

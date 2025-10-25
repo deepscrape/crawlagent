@@ -33,24 +33,23 @@ from redis import RedisError
 
 from apps.seeder import multi_domain_research
 from celery_app import celery_app
-from config import config
+from configure import config
 from crawler_pool import cancel_crawler, get_crawler
 
 # import psutil
 from crawlstore import updateCrawlOperation
+from enums import TaskStatus
 from firestore import FirebaseClient
-from monitor import WorkerMonitor
+from worker_monitor import WorkerMonitor
 from redisCache import REDIS_CHANNEL
 from redisCache import pure_redis as pure_redis_cache
 from redisCache import redis as redis_cache
 from schemas import OperationResult, SystemTaskStats
 from utils import (
-    TaskStatus,
     _get_memory_mb,
     datetime_handler,
     decode_redis_hash,
     is_task_id,
-    load_config,
     measure_stats,
     setup_logging,
     should_cleanup_task,
@@ -105,36 +104,6 @@ def get_event_loop():
             asyncio.set_event_loop(loop)
             return loop
 
-
-# # Global Redis clients for all Celery tasks
-# redis_url = os.environ.get("UPSTASH_REDIS_REST_URL")
-# redis_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-# REDIS_PORT = os.environ.get("UPSTASH_REDIS_PORT")
-# REDIS_USERNAME = os.environ.get("UPSTASH_REDIS_USER")
-# REDIS_PASSWORD = os.environ.get("UPSTASH_REDIS_PASS")
-
-# if not redis_url or not redis_token or not REDIS_PORT or not REDIS_USERNAME or not REDIS_PASSWORD:
-#     raise RuntimeError("Missing one or more Upstash Redis environment variables.")
-
-# REDIS_URL = redis_url.replace("https://", "")
-
-# # Global Upstash Redis client
-# redis = Redis(
-#     url=str(redis_url),
-#     token=str(redis_token),
-#     allow_telemetry=False,
-# )
-
-# # # Global PureRedis client
-# pure_redis = PureRedis(
-#     host=str(REDIS_URL),
-#     port=int(REDIS_PORT),
-#     db=0,
-#     username=str(REDIS_USERNAME),
-#     password=str(REDIS_PASSWORD),
-#     ssl=True,
-#     decode_responses=True
-# )
 
 logger = logging.getLogger("crawlagent")
 # At module level

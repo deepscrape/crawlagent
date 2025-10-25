@@ -25,7 +25,7 @@ from api import (
 )
 from auth import get_token_dependency
 from celery_app import celery_app
-from config import config
+from configure import config
 from redisCache import REDIS_CHANNEL, pure_redis, redis
 from utils import decode_redis_hash
 
@@ -53,11 +53,10 @@ class LlmJobPayload(BaseModel):
 verify_token = get_token_dependency(config)
 
 # ---------- LL​M job ---------------------------------------------------------
-@job_router.post("/llm/job", status_code=202)
+@job_router.post("/llm/job", status_code=202, dependencies=[Depends(verify_token)])
 async def llm_job_enqueue(
         payload: LlmJobPayload,
-        request: Request,
-        decoded_token: Dict = Depends(verify_token),   # late-bound dep
+        request: Request
 ):
     return await handle_llm_request(
         redis,
@@ -69,20 +68,18 @@ async def llm_job_enqueue(
         config=config,
     )
 
-@job_router.get("/llm/job/{task_id}")
+@job_router.get("/llm/job/{task_id}", dependencies=[Depends(verify_token)] )
 async def llm_job_status(
     request: Request,
-    task_id: str,
-    decoded_token: bool = Depends(verify_token)
+    task_id: str
 ):
     return await handle_task_status(redis, task_id)
 
 
-@job_router.put("/{task_id}/cancel", tags=["job", "cancel"])
+@job_router.put("/{task_id}/cancel", tags=["job", "cancel"], dependencies=[Depends(verify_token)])
 async def crawl_job_cancel(
     request: Request,
-    task_id: str,
-    decoded_token: Dict = Depends(verify_token)
+    task_id: str
 ):
     if not task_id:
         return JSONResponse(
@@ -93,7 +90,7 @@ async def crawl_job_cancel(
             }
         )
     try:
-        uid = decoded_token.get("uid") or "jwt_disabled"
+        uid = request.state.uid or "jwt_disabled"
         return await cancel_a_job(redis, uid, task_id)
     except Exception as e:
         return JSONResponse(

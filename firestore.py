@@ -9,7 +9,7 @@ import firebase_admin.firestore
 from dotenv import load_dotenv
 from firebase_admin import credentials
 
-from config import env_file, production
+from configure import env_file, production
 
 # Load environment variables
 load_dotenv(env_file)
