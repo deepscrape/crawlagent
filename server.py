@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -24,11 +25,12 @@ from starlette.datastructures import Address  # Import Address
 
 # from crawl import on_browser_created
 from auth import get_token_dependency
-from config import config, get_custom_limiter, skip_upstash_limiter
+from configure import config, get_custom_limiter, skip_upstash_limiter
 from crawler_pool import close_all, get_crawler, janitor
 from monitoring import init_metrics_app
 from redisCache import default_limiter, pure_redis, test_connection
 from routers.crawl_router import crawl_router
+from routers.diagnostics_router import diagnostics_router
 from routers.job_v1 import job_router
 from routers.seeder_router import seeder_router
 from routers.websocket_router import socket_router
@@ -36,8 +38,9 @@ from routers.websocket_router import socket_router
 # Use uvloop for enhanced performance
 # from tests.ml_model import ml_model
 # from tests.pydantic_models import PredictionRequest
-from utils import periodic_client_cleanup, setup_logging
-from virtual_display_manager import VirtualDisplayManager  # Import VirtualDisplayManager
+from storage import initialize_storage_system
+from utils import configure_webrtc_for_wsl, is_wsl, periodic_client_cleanup, setup_logging, test_webrtc_connectivity
+from virtual_display_manager import VirtualDisplayManager
 
 # ── internal imports (after sys.path append) ─────────────────
 # sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -123,6 +126,58 @@ else:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        """ # Configure WebRTC
+        port_range = config.get("webrtc", {}).get("port_range", "40000-65535")
+        
+        # # Check if running in WSL
+        if is_wsl():
+            logger.info("Running in WSL environment, configuring WebRTC accordingly")
+            
+            # Configure WebRTC for WSL
+            wsl_config = configure_webrtc_for_wsl(port_range)
+            
+            # Log configuration details
+            if wsl_config["success"]:
+                logger.info(f"WebRTC configured for WSL with host IP: {wsl_config['host_ip']}")
+                
+                # Environment variables
+                if wsl_config["env_vars_set"]:
+                    logger.info(f"WebRTC environment variables set: AIORTC_ICE_IP={wsl_config['host_ip']}, "
+                               f"AIORTC_ICE_PORT_RANGE={wsl_config['port_range']}")
+                else:
+                    logger.warning("Failed to set WebRTC environment variables")
+                
+                # Firewall configuration
+                if wsl_config.get("firewall_configured"):
+                    logger.info("Successfully configured Windows firewall for WebRTC")
+                else:
+                    logger.warning(
+                        "Could not configure Windows firewall automatically. "
+                        f"Please ensure UDP ports {port_range} are open in the Windows firewall using "
+                        "the provided wsl_webrtc_fix.ps1 script."
+                    )
+            else:
+                logger.warning("Failed to configure WebRTC for WSL")
+                
+            # Test WebRTC connectivity
+            logger.info("Testing WebRTC connectivity...")
+            connectivity_test = await test_webrtc_connectivity()
+            
+            if connectivity_test["success"]:
+                logger.info(f"WebRTC connectivity test successful. Found {connectivity_test['candidates_count']} candidates.")
+                if connectivity_test.get("has_public_candidate"):
+                    logger.info("✓ Public (STUN) candidates found - external connectivity should work")
+                else:
+                    logger.warning("No public (STUN) candidates found. WebRTC might have limited connectivity.")
+                
+                if connectivity_test.get("has_relay_candidate"):
+                    logger.info("✓ Relay (TURN) candidates found - fallback connectivity available")
+                else:
+                    logger.warning("No relay (TURN) candidates found. WebRTC fallback might not be available.")
+            else:
+                logger.warning(f"WebRTC connectivity test failed: {connectivity_test.get('error', 'Unknown error')}")
+                logger.info("You may need to run the WebRTC fix scripts: wsl_webrtc_fix.sh and wsl_webrtc_fix.ps1") """
+        
         # Initialize VirtualDisplayManager
         app.state.virtual_display_manager = VirtualDisplayManager(
             max_displays=config["virtual_display_manager"].get("max_displays", 5),
@@ -130,21 +185,38 @@ async def lifespan(app: FastAPI):
             start_debug_port=config["virtual_display_manager"].get("start_debug_port", 9222)
         )
         
-        await test_connection(pure_redis)  # Moved from on_event("startup")
         # _ = ml_model.get_feature_info()  # Pre-load the model
         
-        FastAPICache.init(RedisBackend(pure_redis), prefix="fastapi-cache")
+        # Warm-up: Preload a browser instance using config from config.yml
+        # Concatenate extra_args and launch_args for browser configuration
+        browser_args = (
+            config["crawler"]["browser"].get("extra_args", []) +
+            config["crawler"]["browser"].get("launch_args", [])
+        )
         await asyncio.gather(
-             get_crawler(
-                BrowserConfig(
-                    extra_args=config["crawler"]["browser"].get("extra_args", []),
-                    **config["crawler"]["browser"].get("kwargs", {}),
-                )
-            ),  # warm‑up
-            # Pre-load the model
-            
+            test_connection(pure_redis),  # Moved from on_event("startup")
+            get_crawler(
+            BrowserConfig(
+                browser_mode="docker",
+                use_persistent_context=True,
+                use_managed_browser=True,
+                extra_args=browser_args,
+                **config["crawler"]["browser"].get("kwargs", {}),
+            ),
+            ),
             return_exceptions=True
         )
+
+        # Call this function when your application starts
+        health = await initialize_storage_system()
+        if health.get("overall_status") not in ("healthy", "degraded"):
+            logger.error(f"Storage system initialization failed: {health}")
+            # Optionally: raise Exception("Storage system initialization failed")
+        else:
+            logger.info("Storage system initialized", extra={"health": health})
+
+        FastAPICache.init(RedisBackend(pure_redis), prefix="fastapi-cache")
+
         # await test_connection(pure_redis) # Moved from on_event("startup")
         app.state.janitor = asyncio.create_task(janitor())  # idle GC
         app.state.websocket = asyncio.create_task(periodic_client_cleanup())
@@ -162,9 +234,14 @@ async def lifespan(app: FastAPI):
         # if hasattr(app.state, "browser_cleanup"): # Removed as per new architecture
         #     app.state.browser_cleanup.cancel()
         
-        await asyncio.gather( close_all(), app.state.virtual_display_manager.close_all_displays(), return_exceptions=True)
+        # Run cleanup tasks concurrently
+        await asyncio.gather(
+            close_all(),
+            app.state.virtual_display_manager.close_all_displays(),
+            return_exceptions=True
+        )
 
-        # Wait for background tasks to finish
+        # Cancel and wait for all other background tasks concurrently
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for t in tasks:
             t.cancel()
@@ -227,10 +304,9 @@ if config.get("rate_limiting", {}).get("enabled", False):
 
         # Skip rate limiting for routes with the skip_upstash_limiter attribute
         # Check if the endpoint has _skip_upstash_limiter
-        logger.info(f"Skipping rate limiting for {request.url.path} due to route attribute")
         route = request.scope.get("endpoint")
         if route and getattr(route, "_skip_upstash_limiter", True):
-            logger.info(f"Skipping rate limiting for {request.url.path} due to route attribute")
+            logger.debug(f"Skipping rate limiting for {request.url.path} due to route attribute")
             return await call_next(request)
 
          # Skip rate limiting for excluded paths
@@ -320,6 +396,7 @@ app.include_router(socket_router, prefix="/api/v1/ws")
 app.include_router(job_router, prefix="/api/v1/job")
 app.include_router(crawl_router, prefix="/api/v1/crawl")
 app.include_router(seeder_router, prefix="/api/v1/seeder")
+app.include_router(diagnostics_router, prefix="/api/v1/diagnostics")
 
 
 # ── root endpoint ──────────────────────────────────────────────
