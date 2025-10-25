@@ -20,10 +20,10 @@ primary_region = 'ord'
   UPSTASH_REDIS_REST_URL = 'https://gusc1-saved-terrapin-30766.upstash.io'
 
 [processes]
-  # Run Uvicorn with proxy header support:
-  app = 'uvicorn server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*" --ws websockets'
-  worker = 'celery -A celery_app.celery_app worker --loglevel=info -E'
-  worker_exporter = './celery-exporter --broker-url=${CELERY_BROKER_URL} --port=9808 --retry-interval=5 --host=0.0.0.0'
+  # Run supervisord to manage the FastAPI app (Uvicorn)
+  app = "supervisord -c supervisord.conf"
+  worker = "celery -A celery_app.celery_app worker --loglevel=info -E --concurrency=4 --max-tasks-per-child=1000"
+  worker_exporter = "./celery-exporter --broker-url=${CELERY_BROKER_URL} --port=9808 --retry-interval=5 --host=0.0.0.0"
 
 [[services]]
   protocol = 'tcp'
@@ -38,6 +38,10 @@ primary_region = 'ord'
     handlers = ['http']
     force_https = true
 
+  [[services.tcp_checks]]
+    interval = 10000
+    timeout = 2000
+
   [[services.ports]]
     port = 443
     handlers = ['tls', 'http']
@@ -47,14 +51,14 @@ primary_region = 'ord'
     hard_limit = 50
     soft_limit = 35
 
-[[services]]
-  protocol = 'tcp'
-  internal_port = 9222
-  processes = ['app'] # Critical: Remove public Chrome DevTools (9222) or enforce auth + restrict binding
+# [[services]]
+#   protocol = 'tcp'
+#   internal_port = 9222
+#   processes = ['app'] # Critical: Remove public Chrome DevTools (9222) or enforce auth + restrict binding
 
-  [[services.ports]]
-    port = 9222
-    handlers = ['http']
+#   [[services.ports]]
+#     port = 9222
+#     handlers = ['http']
 
 [[services]]
   protocol = 'tcp'

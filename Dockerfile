@@ -19,6 +19,7 @@ ARG APP_HOME=/app
 WORKDIR ${APP_HOME}
 
 # Install build dependencies
+COPY supervisord.conf .
 COPY requirements.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -78,6 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
     supervisor \
+    libffi-dev \
     # Playwright system dependencies
     libglib2.0-0 \
     libnss3 \
@@ -109,6 +111,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     x11-utils \
     pciutils \
+    wmctrl \
     fluxbox \
     git \
     # Add sudo for X11 management
@@ -123,8 +126,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN groupadd -r appuser && \
     useradd --no-log-init -r -g appuser appuser && \
-    mkdir -p /home/appuser/.cache /ms-playwright && \
-    chown -R appuser:appuser /home/appuser /ms-playwright ${APP_HOME}
+    mkdir -p /home/appuser/.cache ${PLAYWRIGHT_BROWSERS_PATH} && \
+    chown -R appuser:appuser /home/appuser ${PLAYWRIGHT_BROWSERS_PATH} ${APP_HOME}
 
 # Install Python dependencies using UV
 # COPY --from=builder /app/wheels /wheels
@@ -168,8 +171,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
 # Switch to non-root user
 USER appuser
 
-# Set the entrypoint
+# Set the entrypoint to run docker-entrypoint.sh before supervisord
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Start application Run Uvicorn with proxy header support:
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws", "websockets"]
+# Start supervisord to manage the FastAPI server process
+CMD ["supervisord", "-c", "supervisord.conf"]

@@ -16,6 +16,8 @@ fly_secrets:
 		[ -n "$CELERY_BROKER_URL" ] && flyctl secrets set CELERY_BROKER_URL=$$CELERY_BROKER_URL; \
 		[ -n "$REDIS_REST_URL" ] && flyctl secrets set REDIS_REST_URL=$$REDIS_REST_URL; \
 		[ -n "$REDIS_REST_PASS" ] && flyctl secrets set REDIS_REST_PASS=$$REDIS_REST_PASS; \
+		[ -n "$AWS_ACCESS_KEY_ID" ] && flyctl secrets set AWS_ACCESS_KEY_ID=$$AWS_ACCESS_KEY_ID; \
+		[ -n "$AWS_SECRET_ACCESS_KEY" ] && flyctl secrets set AWS_SECRET_ACCESS_KEY=$$AWS_SECRET_ACCESS_KEY; \
  	fi
 	@echo "Secrets set successfully!"
 

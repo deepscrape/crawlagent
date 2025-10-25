@@ -49,7 +49,7 @@ from upstash_redis.asyncio import Redis
 from celery_app import celery_app  # Import celery_app here  # Import celery_app
 from crawler_pool import cancel_crawler, get_crawler
 from crawlstore import setCrawlOperation, updateCrawlOperation
-from enums import FilterType
+from enums import FilterType, TaskStatus
 from firestore import FirebaseClient, db
 from redisCache import REDIS_CHANNEL
 from schemas import Author, CrawlOperation
@@ -61,7 +61,6 @@ from tasks import (  # Import Celery tasks
     seeder_multi_research_task,
 )
 from utils import (
-    TaskStatus,
     _get_memory_mb,
     convert_celery_status,
     create_task_status_response,

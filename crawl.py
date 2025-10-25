@@ -156,11 +156,16 @@ async def process_scheduled_tasks():
 
         # Process each task
         for task in tasks:
+            # If task is a tuple (e.g., (member, score)), extract the member string
+            if isinstance(task, tuple):
+                task_str = task[0]
+            else:
+                task_str = task
             # Remove the task from the scheduled queue
-            await redis.zrem(scheduled_queue, task)
+            await redis.zrem(scheduled_queue, task_str)
 
             # Add the task to the operation queue
-            await redis.rpush("operation_queue", task)
+            await redis.rpush("operation_queue", task_str)
 
         # Wait for 1 minute before checking again
         # await asyncio.sleep(RATE_LIMIT_TTL)
@@ -177,7 +182,12 @@ async def pop_batch(task_queue_name: str, batch_size: int) -> list[str]:
     results = await pipe.exec()
 
     if len(results) >= 2 and results[1] == "OK":
-        return results[0]
+        # Ensure results[0] is a list of strings (decode bytes if needed)
+        items = results[0]
+        if isinstance(items, list):
+            return [item.decode("utf-8") if isinstance(item, bytes) else str(item) for item in items]
+        else:
+            return []
     else:
         return []
 
@@ -298,6 +308,8 @@ async def process_task_with_monitoring(max_concurrent=3, task_dataList=None):
     print("task_data: ", task_data)
 
     # instance containing a JSON document deserialize to a Python object.
+    if task_data is None:
+        raise ValueError("task_data is None and cannot be deserialized")
     task = json.loads(task_data)
 
     # set variables

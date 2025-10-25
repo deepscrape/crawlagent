@@ -1,63 +1,160 @@
+version: '3.9'
+
 services:
-  app:
-    build: .
-    container_name: crawlagent-app
-    ports:
-      - "80:8000"
-      - "443:8000"
-      - "8000:8000"
-    environment:
-      - PYTHON_ENV=production
-      - AWS_ENDPOINT_URL_IAM=https://fly.iam.storage.tigris.dev
-      - AWS_ENDPOINT_URL_S3=https://fly.storage.tigris.dev
-      - AWS_REGION=auto
-      - REDIS_MAX_RETRIES=100
-      - REDIS_RETRY_DELAY_SEC=3
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - DISPLAY=:99
-      - PYTHONPATH=/app
-    command: uvicorn server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*" --ws websockets
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 2G
-
-  worker:
-    build: .
-    container_name: crawlagent-worker
-    environment:
-      - PYTHON_ENV=production
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - DISPLAY=:99
-    command: celery -A celery_app.celery_app worker --loglevel=info -E
-    depends_on:
-      - redis
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 2G
-
-  exporter:
-    build: .
-    container_name: crawlagent-celery-exporter
-    ports:
-      - "9808:9808"
-    environment:
-      - PYTHON_ENV=production
-      - CELERY_BROKER_URL=redis://redis:6379/0
-    command: ./celery-exporter --broker-url=${CELERY_BROKER_URL} --port=9808 --retry-interval=5 --host=0.0.0.0
-    depends_on:
-      - redis
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 256M
-
   redis:
     image: redis:alpine
     container_name: crawlagent-redis
     ports:
       - "6379:6379"
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  # Single container with all services managed by supervisord
+  crawlagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crawlagent-app
+    ports:
+      - "8000:8000"    # Uvicorn ASGI server
+      - "9808:9808"    # Prometheus metrics exporter
+      - "9222:9222"    # Chrome DevTools Protocol (debugging)
+      - "6080:6080"    # noVNC web interface
+      - "5900:5900"    # VNC server
+    environment:
+      # Application
+      - PYTHON_ENV=production
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - DISPLAY=:99
+      - PYTHONPATH=/app
+      
+      # AWS/Tigris Configuration (from fly.toml)
+      - AWS_ENDPOINT_URL_IAM=https://fly.iam.storage.tigris.dev
+      - AWS_ENDPOINT_URL_S3=https://fly.storage.tigris.dev
+      - AWS_REGION=auto
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_MAX_RETRIES=100
+      - REDIS_RETRY_DELAY_SEC=3
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      
+      # Browser/Playwright
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - BROWSER_HEADLESS=true
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    volumes:
+      - playwright-cache:/ms-playwright
+      - ./config.yml:/app/config.yml:ro
+      - ./supervisord.conf:/etc/supervisord.conf:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '2'
+          memory: 1G
+
+  # Optional: Separate worker process for horizontal scaling
+  # Uncomment to run worker in separate container
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crawlagent-worker
+    environment:
+      - PYTHON_ENV=production
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - DISPLAY=:99
+      - PYTHONPATH=/app
+      
+      # AWS/Tigris Configuration
+      - AWS_ENDPOINT_URL_IAM=https://fly.iam.storage.tigris.dev
+      - AWS_ENDPOINT_URL_S3=https://fly.storage.tigris.dev
+      - AWS_REGION=auto
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_MAX_RETRIES=100
+      - REDIS_RETRY_DELAY_SEC=3
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      
+      # Browser/Playwright
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - BROWSER_HEADLESS=true
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - playwright-cache:/ms-playwright
+      - ./config.yml:/app/config.yml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '2'
+          memory: 1G
+    command: celery -A celery_app.celery_app worker --loglevel=info -E --concurrency=4 --max-tasks-per-child=1000
+
+  exporter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crawlagent-exporter
+    command: ./celery-exporter --broker-url=${CELERY_BROKER_URL} --port=9808 --retry-interval=5 --host=0.0.0.0
+    ports:
+      - "9808:9808"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - PYTHON_ENV=production
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - playwright-cache:/ms-playwright
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+volumes:
+  playwright-cache:
+    driver: local

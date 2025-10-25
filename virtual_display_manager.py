@@ -29,62 +29,73 @@ class VirtualDisplayManager:
             display_num = self.start_display_num + i
             debug_port = self.start_debug_port + i
             self.available_displays.append((display_num, debug_port))
-        logger.info(f"Initialized VirtualDisplayManager with {len(self.available_displays)} available displays.")
-
+            logger.info(f"Initialized VirtualDisplayManager with {len(self.available_displays)} available displays.")
+    
     async def _launch_xvfb_and_fluxbox(self, display_num: int) -> subprocess.Popen:
         display_addr = f":{display_num}"
-        # Get geometry from xdpyinfo if possible, else fallback
-        geometry = "1920x1080x24"
-        try:
-            xdpyinfo = subprocess.run(
-            ["xdpyinfo"], env={**os.environ, "DISPLAY": display_addr},
-            capture_output=True, text=True, check=True
-            )
-            for line in xdpyinfo.stdout.splitlines():
-                if "dimensions:" in line:
-                    # Example line: dimensions:    1920x1080 pixels (508x285 millimeters)
-                    dims = line.split("dimensions:")[1].split()[0]
-                    width, height = dims.split("x")
-                    geometry = f"{width}x{height}x24"
-                    break
-        except Exception as e:
-            logger.warning(f"Could not get geometry from xdpyinfo: {e}. Using default {geometry}")
-        
-        # Prefer Xorg with Xdummy if available, else Xvfb
+        geometry = "1280x720x24"
         xserver_bin = "Xorg"
         try:
-            # Check if Xdummy is available
             subprocess.run(["which", "Xdummy"], check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             xserver_bin = "Xvfb"
             try:
-                # Check if Xvfb is available
                 subprocess.run(["which", "Xvfb"], check=True, capture_output=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                raise RuntimeError("Neither Xdummy nor Xvfb found. Cannot launch virtual display.") from e
+            except (subprocess.CalledProcessError, FileNotFoundError) as err:
+                raise RuntimeError("Neither Xdummy nor Xvfb found. Cannot launch virtual display.") from err
 
-        # Check if fluxbox is available
         try:
             subprocess.run(["which", "fluxbox"], check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            raise RuntimeError("fluxbox not found. Cannot launch virtual display.")
+        except (subprocess.CalledProcessError, FileNotFoundError) as err:
+            raise RuntimeError("fluxbox not found. Cannot launch virtual display.") from err
 
         command = [xserver_bin, display_addr, "-screen", "0", geometry, "-nolisten", "tcp"]
         logger.info(f"Launching X server: {' '.join(command)}")
-        # Use os.setsid to create a new session for Xvfb, so it doesn't die with the parent
-        xvfb_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                        preexec_fn = getattr(os, "setsid", None) if self.is_linux else None)
-        await asyncio.sleep(0.5) # Give X server time to start
-        
-        # Start a minimal window manager (fluxbox)
+
+        xvfb_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        preexec_fn=getattr(os, "setsid", None) if self.is_linux else None)
+
+        await asyncio.sleep(2.0)
+
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                if self.is_linux:
+                    proc_check = subprocess.run(
+                        ["ps", "-p", str(xvfb_process.pid)],
+                        capture_output=True, text=True
+                    )
+                    if xvfb_process.poll() is not None or "defunct" in proc_check.stdout:
+                        raise RuntimeError(f"X server process {xvfb_process.pid} is not running properly")
+
+                xdpyinfo = subprocess.run(
+                    ["xdpyinfo"], env={**os.environ, "DISPLAY": display_addr},
+                    capture_output=True, text=True, check=True
+                )
+                for line in xdpyinfo.stdout.splitlines():
+                    if "dimensions:" in line:
+                        dims = line.split("dimensions:")[1].split()[0]
+                        width, height = dims.split("x")
+                        geometry = f"{width}x{height}x24"
+                        break
+                logger.debug(f"Successfully got display info from xdpyinfo after {attempt+1} attempts")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.debug(f"xdpyinfo attempt {attempt+1} failed: {e}, retrying in 1 second...")
+                    await asyncio.sleep(1.0)
+                else:
+                    logger.warning(
+                        f"Could not get geometry from xdpyinfo after {max_retries} attempts: {e}. "
+                        f"Using default {geometry}"
+                    )
+
         fluxbox_command = ["fluxbox"]
         logger.info(f"Launching fluxbox on {display_addr}: {' '.join(fluxbox_command)}")
-        # Use os.setsid to create a new session for fluxbox, so it doesn't die with the parent
         preexec_fn = getattr(os, "setsid", None) if self.is_linux else None
-        subprocess.Popen(fluxbox_command, env={**os.environ, "DISPLAY": display_addr}, stdout=subprocess.PIPE, 
-                         stderr=subprocess.PIPE, preexec_fn=preexec_fn)
-        await asyncio.sleep(0.2) # Give WM time to start
-        
+        subprocess.Popen(fluxbox_command, env={**os.environ, "DISPLAY": display_addr}, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, preexec_fn=preexec_fn)
+        await asyncio.sleep(0.5)
         return xvfb_process
 
     async def _kill_xvfb_and_fluxbox(self, xvfb_process: Optional[subprocess.Popen]):

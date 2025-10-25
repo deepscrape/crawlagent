@@ -96,7 +96,7 @@ crawler:
       - "--ignore-certificate-errors"
     launch_args:
       - "--remote-debugging-address=0.0.0.0"
-      - "--remote-debugging-port=9222"
+      - "--remote-debugging-port=3000"
 
 # Logging Configuration
 logging:
@@ -111,3 +111,56 @@ observability:
     endpoint: "/metrics"
   health_check:
     endpoint: "/health"
+
+storage:
+  primary:
+    bucket: "crawlagent.bucket.a"
+    region: "auto"
+    endpoint: "https://fly.storage.tigris.dev"
+    pool:
+      max_connections: 20
+      concurrent_request_limit: 100
+  
+  # Cache configuration
+  cache:
+    enabled: true
+    ttl: 300  # 5 minutes in seconds
+    prefix: "storage"
+  
+  # Retry configuration
+  retry:
+    max_attempts: 3
+    base_delay: 1.0
+    max_delay: 10.0
+    exponential_base: 2
+  
+  # Monitoring configuration
+  monitoring:
+    enabled: true
+    metrics_enabled: true
+    health_check_enabled: true
+  
+  # Compression configuration
+  compression:
+    enabled: true
+    level: 3  # zstd compression level (1-22)
+    min_size: 1024  # Minimum file size to compress (bytes)
+  
+  backup:
+    enabled: true
+    buckets:
+      - name: "crawlagent-backup-us"
+        region: "us-east-1"
+        endpoint: "https://fly.storage.tigris.dev"
+      - name: "crawlagent-backup-eu" 
+        region: "eu-west-1"
+        endpoint: "https://fly.storage.tigris.dev"
+    
+    retention:
+      daily_backups: 7
+      weekly_backups: 4
+      monthly_backups: 12
+    
+    schedule:
+      incremental: "0 */6 * * *"  # Every 6 hours
+      full: "0 2 * * 0"           # Weekly on Sunday 2 AM

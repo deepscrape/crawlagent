@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.22.0",
     "gunicorn>=21.2.0",
+    "supervisor>=4.2.5",
     "websockets>=11.0.3",
     "uvloop>=0.17.0",
 

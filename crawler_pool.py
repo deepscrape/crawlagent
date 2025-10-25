@@ -9,7 +9,7 @@ from typing import Dict
 import psutil
 from crawl4ai import AsyncWebCrawler, BrowserConfig
 
-from config import config
+from configure import config
 
 CONFIG = config
 

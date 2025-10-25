@@ -15,7 +15,7 @@ logger = logging.getLogger("crawlagent")
 
 # Advanced WebSocket Monitoring
 # Per-Connection Metrics
-class ConnectionManager:
+class WebSocketManager:
     def __init__(self):
         self.active_connections: Dict[str, Dict] = {}
         self.connection_stats: Dict = {
@@ -119,7 +119,8 @@ class ConnectionManager:
             "global_stats": self.connection_stats,
             "connections": connection_details
         }
-manager = ConnectionManager()
+# Singleton instance for managing WebSocket connections
+websocket_manager = WebSocketManager()
 
 
 
