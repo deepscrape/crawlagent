@@ -1,25 +1,24 @@
 # Resource Monitor Class
 import asyncio
-import json
+import logging
 import os
 import socket
-import time
-import uuid
 
 import firebase_admin.firestore
 import psutil
 from kombu import Queue
 
+from enums import TaskStatus
 from redisCache import redis
 from schemas import OperationResult, SystemStats
-from utils import TaskStatus, retry_async
+from utils import retry_async
 
 MAX_QUEUE_LENGTH = 180
 RATE_LIMIT_TTL = 60  # 1 minute
 RATE_LIMIT_COUNT = 75  # 75 operations per minute
 WAITING_TIME = 0.1  # 5 seconds
 
-
+logger = logging.getLogger("crawlagent")
 class ResourceMonitor:
     def __init__(self, num_cores=None):
         self.memory_threshold = 0.85  # 85%
@@ -53,7 +52,9 @@ class ResourceMonitor:
 
 # Worker Pool Management
 class WorkerMonitor:
-    def __init__(self, worker_id, db = None, queue_name=Queue("celery").name):
+    def __init__(self, worker_id, db=None, queue_name=None):
+        if queue_name is None:
+            queue_name = Queue("celery").name
         fly_machine_id = str(os.environ.get("FLY_ALLOC_ID", socket.gethostname()))
         self.machine_id = f"{fly_machine_id}:process:{str(worker_id)}"
         self.queue_name = queue_name
@@ -64,6 +65,8 @@ class WorkerMonitor:
             memory_usage=0,
             queue_length=0,
             error_rate=0,
+            machine_id=self.machine_id,
+            total_operations=0,
         )
 
     async def get_operation_queue_len(self):
@@ -93,7 +96,8 @@ class WorkerMonitor:
         operation_id = operation_metrics.operation_id
 
         # Store in redis for real-time monitoring
-        await retry_async(redis.hset, f"operation_metrics:{operation_id}", values=operation_metrics.model_dump(exclude={"operation_id"}))
+        await retry_async(redis.hset, f"operation_metrics:{operation_id}", 
+                          values=operation_metrics.model_dump(exclude={"operation_id"}))
 
         # Store in Firestore for historical analysis
         if operation_metrics.status == TaskStatus.COMPLETED.value:
@@ -108,6 +112,7 @@ class WorkerMonitor:
             await retry_async(run_in_executor, doc_ref.set, {
                 "timestamp": firebase_admin.firestore.firestore.SERVER_TIMESTAMP,
                 "duration": operation_metrics.duration,
+                "peak_memory": operation_metrics.peak_memory,
                 "memory_used": operation_metrics.memory_used,
                 "urls_processed": operation_metrics.urls_processed,
                 "machine_id": self.machine_id,
@@ -136,6 +141,7 @@ class WorkerMonitor:
             await retry_async(redis.hset, f"operation_metrics:{operation_id}", values={"status": TaskStatus.CANCELED.value})
 
             if not self.firestore_client:
+                # print a warning
                 return
 
             doc_ref = self.firestore_client.collection("operation_metrics").document(
@@ -159,19 +165,37 @@ class WorkerMonitor:
     async def record_error(self, error):
         # Record error in redis
         await redis.hincrby("record_error", self.machine_id, 1)
-        print(f"Error recorded for machine {self.machine_id}: {error}")
+        logger.info(f"Error recorded for machine {self.machine_id}: {error}")
 
     async def record_operation(self):
         # Record error in redis
         await redis.hincrby("total_operations", self.machine_id, 1)
 
     async def get_error_rate(self):
-        # Calculate error rate based on operation metrics
-        error_count = await redis.hget("record_error", self.machine_id)
-        total_operations = await redis.hget("total_operations", self.machine_id)
-        if error_count and total_operations:
-            return int(error_count) / int(total_operations)
-        return 0
+        # Calculate error rate based on operation metrics using pipeline for efficiency
+        async with redis.multi() as pipe:
+            
+            pipe.hget("record_error", self.machine_id)
+            pipe.hget("total_operations", self.machine_id)
+                
+            results = await pipe.exec()
+            logger.warning(f"record_error, total_operations: {results}")
+            error_count = results[0] if results else None
+            total_operations = results[1] if len(results) > 1 else None
+
+            try:
+                # Convert to scalar values if they are lists or other complex types
+                if isinstance(error_count, int) and error_count and isinstance(total_operations, int) and total_operations:
+                    error_rate = (error_count / total_operations) if total_operations > 0 else 0.0
+                else:
+                    error_rate = 0.0
+                    total_operations = 0
+                
+
+                return error_rate, total_operations
+            except (ValueError, TypeError):
+                return 0, 0  # Default to 0 if conversion fails
+        return 0, 0 
 
     async def update_metrics(self):
         """
@@ -185,12 +209,17 @@ class WorkerMonitor:
         Raises:
             Any exceptions raised by the underlying async methods or Redis operations.
         """
-        queue_length = await self.get_operation_queue_len()
+        queue_length, (error_rate, total_operations) = await asyncio.gather(
+            self.get_operation_queue_len(),
+            self.get_error_rate(),
+        )
         systats = SystemStats(
-                cpu_usage=psutil.cpu_percent(),
-                memory_usage=psutil.virtual_memory().percent,
-                queue_length=queue_length,
-                error_rate=await self.get_error_rate(),
+            cpu_usage=psutil.cpu_percent(),
+            memory_usage=psutil.virtual_memory().percent,
+            queue_length=queue_length,
+            error_rate=error_rate,
+            total_operations=total_operations,
+            machine_id=self.machine_id,
             )
         self.metrics = systats
         
